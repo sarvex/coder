@@ -695,6 +695,48 @@ func TestAgent(t *testing.T) {
 			return err == nil
 		}, testutil.WaitShort, testutil.IntervalFast)
 	})
+	t.Run("ListeningPorts", func(t *testing.T) {
+		t.Parallel()
+
+		if runtime.GOOS != "linux" {
+			t.Skip("Only supported on linux currently")
+		}
+
+		conn, _, _ := setupAgent(t, codersdk.WorkspaceAgentMetadata{}, testutil.WaitShort)
+		defer conn.Close()
+
+		var wantPorts []uint16
+		for i := 0; i < 4; i++ {
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { l.Close() })
+			_, portStr, err := net.SplitHostPort(l.Addr().String())
+			require.NoError(t, err)
+			portInt, err := strconv.Atoi(portStr)
+			require.NoError(t, err)
+			wantPorts = append(wantPorts, uint16(portInt))
+		}
+
+		ctx := context.Background()
+		require.Eventually(t, func() bool {
+			ports, err := conn.ListeningPorts(ctx)
+			if err != nil {
+				panic(err)
+			}
+		outer:
+			for _, wantPort := range wantPorts {
+				for _, port := range ports.Ports {
+					if port.Port == wantPort {
+						// found this port
+						continue outer
+					}
+				}
+				t.Errorf("didn't find %v", wantPort)
+				return false
+			}
+			return true
+		}, testutil.WaitMedium, testutil.IntervalFast)
+	})
 }
 
 func setupSSHCommand(t *testing.T, beforeArgs []string, afterArgs []string) *exec.Cmd {

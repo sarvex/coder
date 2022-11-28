@@ -15,6 +15,7 @@ func (lp *listeningPortsHandler) getListeningPorts() ([]codersdk.ListeningPort, 
 	lp.mut.Lock()
 	defer lp.mut.Unlock()
 
+	// Refresh cache every second.
 	if time.Since(lp.mtime) < time.Second {
 		// copy
 		ports := make([]codersdk.ListeningPort, len(lp.ports))
