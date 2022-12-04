@@ -9,12 +9,14 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
 	"golang.org/x/xerrors"
 
 	agpl "github.com/coder/coder/cli"
 	"github.com/coder/coder/cli/cliui"
 	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/enterprise/coderd/license"
 )
 
 var jwtRegexp = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
@@ -119,7 +121,42 @@ func validJWT(s string) error {
 	return xerrors.New("Invalid license")
 }
 
+func parseClaims(c map[string]interface{}) (*license.Claims, error) {
+	byt, err := json.Marshal(c)
+	if err != nil {
+		return nil, err
+	}
+	var claims license.Claims
+	err = json.Unmarshal(byt, &claims)
+	if err != nil {
+		return nil, err
+	}
+	return &claims, nil
+}
+
+func prettyPrintLicenses(w io.Writer, ls []codersdk.License) error {
+	for _, l := range ls {
+		fmt.Fprintf(w, "--- License #%v\n", l.ID)
+		t := cliui.Table()
+		t.AppendHeader(table.Row{"Feature", "Status"})
+		claims, err := parseClaims(l.Claims)
+		if err != nil {
+			return err
+		}
+		if claims.AllFeatures {
+			for _, name := range codersdk.FeatureNames {
+				t.AppendRow(table.Row{name, "Available"})
+			}
+		}
+		// features, ok := l.Claims["features"].(map[string])
+		_, _ = io.WriteString(w, t.Render())
+		fmt.Fprintf(w, "%+v\n", claims)
+	}
+	return nil
+}
+
 func licensesList() *cobra.Command {
+	var formatJSON bool
 	cmd := &cobra.Command{
 		Use:     "list",
 		Short:   "List licenses (including expired)",
@@ -135,16 +172,23 @@ func licensesList() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Ensure that we print "[]" instead of "null" when there are no licenses.
-			if licenses == nil {
-				licenses = make([]codersdk.License, 0)
+
+			if formatJSON {
+				// Ensure that we print "[]" instead of "null" when there are no licenses.
+				if licenses == nil {
+					licenses = make([]codersdk.License, 0)
+				}
+
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(licenses)
 			}
 
-			enc := json.NewEncoder(cmd.OutOrStdout())
-			enc.SetIndent("", "  ")
-			return enc.Encode(licenses)
+			prettyPrintLicenses(cmd.OutOrStdout(), licenses)
+			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&formatJSON, "json", false, "Show raw license JSON")
 	return cmd
 }
 
