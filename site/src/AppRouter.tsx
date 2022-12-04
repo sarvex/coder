@@ -85,6 +85,9 @@ const GitAuthSettingsPage = lazy(
 const NetworkSettingsPage = lazy(
   () => import("./pages/DeploySettingsPage/NetworkSettingsPage"),
 )
+const LicenseSettingsPage = lazy(
+  () => import("./pages/DeploySettingsPage/LicenseSettingsPage"),
+)
 const GitAuthPage = lazy(() => import("./pages/GitAuthPage/GitAuthPage"))
 const TemplateVersionPage = lazy(
   () => import("./pages/TemplateVersionPage/TemplateVersionPage"),
@@ -340,6 +343,20 @@ export const AppRouter: FC = () => {
                 >
                   <DeploySettingsLayout>
                     <GitAuthSettingsPage />
+                  </DeploySettingsLayout>
+                </RequirePermission>
+              </AuthAndFrame>
+            }
+          />
+          <Route
+            path="license"
+            element={
+              <AuthAndFrame>
+                <RequirePermission
+                  isFeatureVisible={Boolean(permissions?.viewDeploymentConfig)}
+                >
+                  <DeploySettingsLayout>
+                    <LicenseSettingsPage />
                   </DeploySettingsLayout>
                 </RequirePermission>
               </AuthAndFrame>

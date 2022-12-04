@@ -1,6 +1,7 @@
 import { makeStyles } from "@material-ui/core/styles"
 import LaunchOutlined from "@material-ui/icons/LaunchOutlined"
 import LockRounded from "@material-ui/icons/LockRounded"
+import Gavel from "@material-ui/icons/Gavel"
 import Globe from "@material-ui/icons/Public"
 import VpnKeyOutlined from "@material-ui/icons/VpnKeyOutlined"
 import { useSelector } from "@xstate/react"
@@ -86,6 +87,12 @@ export const Sidebar: React.FC = () => {
         icon={<SidebarNavItemIcon icon={LockRounded} />}
       >
         Security
+      </SidebarNavItem>
+      <SidebarNavItem
+        href="../license"
+        icon={<SidebarNavItemIcon icon={Gavel} />}
+      >
+        License
       </SidebarNavItem>
     </nav>
   )
