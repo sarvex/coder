@@ -15,15 +15,28 @@ Coder with Docker has the following advantages:
 
 1. Run Coder with Docker.
 
-   ```shell
+   **Linux:**
+
+   ```sh
    export CODER_DATA=$HOME/.config/coderv2-docker
    export DOCKER_GROUP=$(getent group docker | cut -d: -f3)
    mkdir -p $CODER_DATA
    docker run --rm -it \
-       -v $CODER_DATA:/home/coder/.config \
-       -v /var/run/docker.sock:/var/run/docker.sock \
-       --group-add $DOCKER_GROUP \
-       ghcr.io/coder/coder:latest
+     -v $CODER_DATA:/home/coder/.config \
+     -v /var/run/docker.sock:/var/run/docker.sock \
+     --group-add $DOCKER_GROUP \
+     ghcr.io/coder/coder:latest
+   ```
+
+   **macOS:**
+
+   ```sh
+   export CODER_DATA=$HOME/.config/coderv2-docker
+   mkdir -p $CODER_DATA
+   docker run --rm -it \
+     -v $CODER_DATA:/home/coder/.config \
+     -v /var/run/docker.sock:/var/run/docker.sock \
+     ghcr.io/coder/coder:latest
    ```
 
    > This will use Coder's tunnel and built-in database. See our [Docker documentation](../install/docker.md) for other configuration options such as running on localhost, using docker-compose, and external PostgreSQL.

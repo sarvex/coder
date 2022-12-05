@@ -9,6 +9,8 @@ Docker is required. See the [official installation documentation](https://docs.d
 For proof-of-concept deployments, you can run a complete Coder instance with
 the following command:
 
+**Linux:**
+
 ```sh
 export CODER_DATA=$HOME/.config/coderv2-docker
 export DOCKER_GROUP=$(getent group docker | cut -d: -f3)
@@ -17,6 +19,17 @@ docker run --rm -it \
   -v $CODER_DATA:/home/coder/.config \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --group-add $DOCKER_GROUP \
+  ghcr.io/coder/coder:latest
+```
+
+**macOS:**
+
+```sh
+export CODER_DATA=$HOME/.config/coderv2-docker
+mkdir -p $CODER_DATA
+docker run --rm -it \
+  -v $CODER_DATA:/home/coder/.config \
+  -v /var/run/docker.sock:/var/run/docker.sock \
   ghcr.io/coder/coder:latest
 ```
 
@@ -33,6 +46,20 @@ Learn more about Coder's [configuration options](../admin/configure.md).
 For production deployments, we recommend using an external PostgreSQL database
 (version 13 or higher). Set `ACCESS_URL` to the external URL that users and
 workspaces will use to connect to Coder.
+
+**Linux:**
+
+```sh
+export DOCKER_GROUP=$(getent group docker | cut -d: -f3)
+docker run --rm -it \
+  -e CODER_ACCESS_URL="https://coder.example.com" \
+  -e CODER_PG_CONNECTION_URL="postgresql://username:password@database/coder" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --group-add $DOCKER_GROUP \
+  ghcr.io/coder/coder:latest
+```
+
+**macOS:**
 
 ```sh
 docker run --rm -it \
