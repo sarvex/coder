@@ -147,6 +147,8 @@ func prettyPrintLicenses(w io.Writer, ls []codersdk.License) error {
 			for _, name := range codersdk.FeatureNames {
 				t.AppendRow(table.Row{name, "Available"})
 			}
+		} else {
+			for _, name := claims.Features
 		}
 		// features, ok := l.Claims["features"].(map[string])
 		_, _ = io.WriteString(w, t.Render())
