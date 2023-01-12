@@ -11,6 +11,10 @@ module.exports = {
   // SEE: https://storybook.js.org/docs/react/configure/overview#configure-story-loading
   stories: ["../src/**/*.stories.tsx"],
 
+  features: {
+    interactionsDebugger: true, // 👈 Enable playback controls
+  },
+
   // addons are official and community plugins to extend Storybook.
   //
   // SEE: https://storybook.js.org/addons
@@ -22,6 +26,7 @@ module.exports = {
         actions: false,
       },
     },
+    '@storybook/addon-interactions',
   ],
 
   // SEE: https://storybook.js.org/docs/react/configure/babel
