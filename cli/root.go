@@ -18,6 +18,8 @@ import (
 
 	"golang.org/x/xerrors"
 
+	"cdr.dev/slog"
+
 	"github.com/charmbracelet/lipgloss"
 	"github.com/kirsle/configdir"
 	"github.com/mattn/go-isatty"
@@ -28,7 +30,6 @@ import (
 	"github.com/coder/coder/cli/cliui"
 	"github.com/coder/coder/cli/config"
 	"github.com/coder/coder/cli/deployment"
-	"github.com/coder/coder/coderd"
 	"github.com/coder/coder/coderd/gitauth"
 	"github.com/coder/coder/codersdk"
 )
@@ -105,11 +106,10 @@ func Core() []*cobra.Command {
 	}
 }
 
+type ServerFunc func(ctx context.Context, options interface{}) (interface{}, io.Closer, error)
+
 func AGPL() []*cobra.Command {
-	all := append(Core(), Server(deployment.NewViper(), func(_ context.Context, o *coderd.Options) (*coderd.API, io.Closer, error) {
-		api := coderd.New(o)
-		return api, api, nil
-	}))
+	all := append(Core(), Server(deployment.NewViper(), serverFunc()))
 	return all
 }
 
@@ -722,5 +722,28 @@ func dumpHandler(ctx context.Context) {
 			//nolint:revive
 			os.Exit(1)
 		}
+	}
+}
+
+func serveHandler(ctx context.Context, logger slog.Logger, handler http.Handler, addr, name string) (closeFunc func()) {
+	logger.Debug(ctx, "http server listening", slog.F("addr", addr), slog.F("name", name))
+
+	// ReadHeaderTimeout is purposefully not enabled. It caused some issues with
+	// websockets over the dev tunnel.
+	// See: https://github.com/coder/coder/pull/3730
+	//nolint:gosec
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: handler,
+	}
+	go func() {
+		err := srv.ListenAndServe()
+		if err != nil && !xerrors.Is(err, http.ErrServerClosed) {
+			logger.Error(ctx, "http server listen", slog.F("name", name), slog.Error(err))
+		}
+	}()
+
+	return func() {
+		_ = srv.Close()
 	}
 }
