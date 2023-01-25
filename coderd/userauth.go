@@ -534,7 +534,7 @@ func (api *API) oauthLogin(r *http.Request, params oauthLoginParams) (*http.Cook
 		// The migration that added the user_links table could not populate
 		// the 'linked_id' field since it requires fields off the access token.
 		if link.LinkedID == "" {
-			link, err = tx.UpdateUserLinkedID(ctx, database.UpdateUserLinkedIDParams{
+			link, err = tx.System().UpdateUserLinkedID(ctx, database.UpdateUserLinkedIDParams{
 				UserID:    user.ID,
 				LoginType: params.LoginType,
 				LinkedID:  params.LinkedID,
@@ -545,7 +545,7 @@ func (api *API) oauthLogin(r *http.Request, params oauthLoginParams) (*http.Cook
 		}
 
 		if link.UserID != uuid.Nil {
-			link, err = tx.UpdateUserLink(ctx, database.UpdateUserLinkParams{
+			link, err = tx.System().UpdateUserLink(ctx, database.UpdateUserLinkParams{
 				UserID:            user.ID,
 				LoginType:         params.LoginType,
 				OAuthAccessToken:  params.State.Token.AccessToken,

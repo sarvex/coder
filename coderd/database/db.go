@@ -22,6 +22,7 @@ import (
 // It extends the generated interface to add transaction support.
 type Store interface {
 	querier
+	systemQuerier
 	// customQuerier contains custom queries that are not generated.
 	customQuerier
 
@@ -60,7 +61,11 @@ type sqlQuerier struct {
 	db  DBTX
 }
 
-// Ping returns the time it takes to ping the database.
+func (q *sqlQuerier) System() System {
+	return System(q)
+}
+
+// Ping returns the time it takes to ping the
 func (q *sqlQuerier) Ping(ctx context.Context) (time.Duration, error) {
 	start := time.Now()
 	err := q.sdb.PingContext(ctx)

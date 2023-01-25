@@ -202,6 +202,8 @@ func (q *fakeQuerier) InTx(fn func(database.Store) error, _ *sql.TxOptions) erro
 	return fn(&fakeQuerier{mutex: inTxMutex{}, data: q.data})
 }
 
+func (q *fakeQuerier) System() database.System { return database.System(q) }
+
 func (q *fakeQuerier) AcquireProvisionerJob(_ context.Context, arg database.AcquireProvisionerJobParams) (database.ProvisionerJob, error) {
 	if err := validateDatabaseType(arg); err != nil {
 		return database.ProvisionerJob{}, err
