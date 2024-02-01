@@ -87,6 +87,7 @@ require (
 	github.com/gliderlabs/ssh v0.3.4
 	github.com/go-chi/chi v1.5.4
 	github.com/go-chi/chi/v5 v5.0.7
+	github.com/go-chi/cors v1.2.1
 	github.com/go-chi/httprate v0.7.1
 	github.com/go-chi/render v1.0.1
 	github.com/go-jose/go-jose/v3 v3.0.0
@@ -119,7 +120,7 @@ require (
 	github.com/mattn/go-isatty v0.0.17
 	github.com/mitchellh/go-wordwrap v1.0.1
 	github.com/mitchellh/mapstructure v1.5.0
-	github.com/moby/moby v20.10.23+incompatible
+	github.com/moby/moby v24.0.9+incompatible
 	github.com/muesli/reflow v0.3.0
 	github.com/open-policy-agent/opa v0.51.0
 	github.com/ory/dockertest/v3 v3.9.1
@@ -174,10 +175,7 @@ require (
 	tailscale.com v1.32.2
 )
 
-require (
-	github.com/armon/go-radix v1.0.0 // indirect
-	github.com/go-chi/cors v1.2.1 // indirect
-)
+require github.com/armon/go-radix v1.0.0 // indirect
 
 require (
 	cloud.google.com/go/compute v1.18.0 // indirect
