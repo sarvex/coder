@@ -87,6 +87,7 @@ require (
 	github.com/gliderlabs/ssh v0.3.4
 	github.com/go-chi/chi v1.5.4
 	github.com/go-chi/chi/v5 v5.0.7
+	github.com/go-chi/cors v1.2.1
 	github.com/go-chi/httprate v0.7.1
 	github.com/go-chi/render v1.0.1
 	github.com/go-jose/go-jose/v3 v3.0.0
@@ -165,7 +166,7 @@ require (
 	golang.zx2c4.com/wireguard v0.0.0-20230223181233-21636207a675
 	google.golang.org/api v0.108.0
 	google.golang.org/grpc v1.54.0
-	google.golang.org/protobuf v1.28.2-0.20230118093459-a9481185b34d
+	google.golang.org/protobuf v1.33.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
 	gvisor.dev/gvisor v0.0.0-20221203005347-703fd9b7fbc0
@@ -174,10 +175,7 @@ require (
 	tailscale.com v1.32.2
 )
 
-require (
-	github.com/armon/go-radix v1.0.0 // indirect
-	github.com/go-chi/cors v1.2.1 // indirect
-)
+require github.com/armon/go-radix v1.0.0 // indirect
 
 require (
 	cloud.google.com/go/compute v1.18.0 // indirect
