@@ -87,6 +87,7 @@ require (
 	github.com/gliderlabs/ssh v0.3.4
 	github.com/go-chi/chi v1.5.4
 	github.com/go-chi/chi/v5 v5.0.7
+	github.com/go-chi/cors v1.2.1
 	github.com/go-chi/httprate v0.7.1
 	github.com/go-chi/render v1.0.1
 	github.com/go-jose/go-jose/v3 v3.0.0
@@ -171,13 +172,10 @@ require (
 	gvisor.dev/gvisor v0.0.0-20221203005347-703fd9b7fbc0
 	nhooyr.io/websocket v1.8.7
 	storj.io/drpc v0.0.33-0.20230420154621-9716137f6037
-	tailscale.com v1.32.2
+	tailscale.com v1.32.3
 )
 
-require (
-	github.com/armon/go-radix v1.0.0 // indirect
-	github.com/go-chi/cors v1.2.1 // indirect
-)
+require github.com/armon/go-radix v1.0.0 // indirect
 
 require (
 	cloud.google.com/go/compute v1.18.0 // indirect
