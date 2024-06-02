@@ -21,7 +21,7 @@ replace go.opencensus.io => github.com/kylecarbs/opencensus-go v0.23.1-0.2022030
 replace github.com/rivo/tview => github.com/kylecarbs/tview v0.0.0-20220309202238-8464256e10a1
 
 // glog has a single goroutine leak on start that we removed in a fork: https://github.com/coder/glog/pull/1.
-replace github.com/golang/glog => github.com/coder/glog v1.0.1-0.20220322161911-7365fe7f2cd1
+replace github.com/golang/glog => github.com/coder/glog v1.0.1-0.20220323221746-33690bf45e15
 
 // kcp-go starts a goroutine in an init function that we can't stop. It was
 // fixed in our fork:
@@ -87,6 +87,7 @@ require (
 	github.com/gliderlabs/ssh v0.3.4
 	github.com/go-chi/chi v1.5.4
 	github.com/go-chi/chi/v5 v5.0.7
+	github.com/go-chi/cors v1.2.1
 	github.com/go-chi/httprate v0.7.1
 	github.com/go-chi/render v1.0.1
 	github.com/go-jose/go-jose/v3 v3.0.0
@@ -174,10 +175,7 @@ require (
 	tailscale.com v1.32.2
 )
 
-require (
-	github.com/armon/go-radix v1.0.0 // indirect
-	github.com/go-chi/cors v1.2.1 // indirect
-)
+require github.com/armon/go-radix v1.0.0 // indirect
 
 require (
 	cloud.google.com/go/compute v1.18.0 // indirect
