@@ -1,86 +1,69 @@
-import { makeStyles } from "@mui/styles"
-import { Sidebar } from "./Sidebar"
-import { Stack } from "components/Stack/Stack"
-import { createContext, FC, Suspense, useContext } from "react"
-import { Helmet } from "react-helmet-async"
-import { pageTitle } from "../../utils/page"
-import { Loader } from "components/Loader/Loader"
-import { Outlet, useParams } from "react-router-dom"
-import { Margins } from "components/Margins/Margins"
-import { getWorkspaceByOwnerAndName } from "api/api"
-import { useQuery } from "@tanstack/react-query"
+import { workspaceByOwnerAndName } from "api/queries/workspaces";
+import type { Workspace } from "api/typesGenerated";
+import { ErrorAlert } from "components/Alert/ErrorAlert";
+import { Loader } from "components/Loader/Loader";
+import { Margins } from "components/Margins/Margins";
+import { Stack } from "components/Stack/Stack";
+import { type FC, Suspense, createContext, useContext } from "react";
+import { Helmet } from "react-helmet-async";
+import { useQuery } from "react-query";
+import { Outlet, useParams } from "react-router-dom";
+import { pageTitle } from "utils/page";
+import { Sidebar } from "./Sidebar";
 
-const fetchWorkspaceSettings = async (owner: string, name: string) => {
-  const workspace = await getWorkspaceByOwnerAndName(owner, name)
+const WorkspaceSettings = createContext<Workspace | undefined>(undefined);
 
-  return {
-    workspace,
-  }
-}
+export function useWorkspaceSettings() {
+	const value = useContext(WorkspaceSettings);
+	if (!value) {
+		throw new Error(
+			"This hook can only be used from a workspace settings page",
+		);
+	}
 
-const useWorkspace = (owner: string, name: string) => {
-  return useQuery({
-    queryKey: ["workspace", name, "settings"],
-    queryFn: () => fetchWorkspaceSettings(owner, name),
-  })
-}
-
-const WorkspaceSettingsContext = createContext<
-  Awaited<ReturnType<typeof fetchWorkspaceSettings>> | undefined
->(undefined)
-
-export const useWorkspaceSettingsContext = () => {
-  const context = useContext(WorkspaceSettingsContext)
-
-  if (!context) {
-    throw new Error(
-      "useWorkspaceSettingsContext must be used within a WorkspaceSettingsContext.Provider",
-    )
-  }
-
-  return context
+	return value;
 }
 
 export const WorkspaceSettingsLayout: FC = () => {
-  const styles = useStyles()
-  const { workspace: workspaceName, username } = useParams() as {
-    workspace: string
-    username: string
-  }
-  const { data: settings } = useWorkspace(username, workspaceName)
+	const params = useParams() as {
+		workspace: string;
+		username: string;
+	};
+	const workspaceName = params.workspace;
+	const username = params.username.replace("@", "");
+	const {
+		data: workspace,
+		error,
+		isLoading,
+		isError,
+	} = useQuery(workspaceByOwnerAndName(username, workspaceName));
 
-  return (
-    <>
-      <Helmet>
-        <title>{pageTitle([workspaceName, "Settings"])}</title>
-      </Helmet>
+	if (isLoading) {
+		return <Loader />;
+	}
 
-      {settings ? (
-        <WorkspaceSettingsContext.Provider value={settings}>
-          <Margins>
-            <Stack className={styles.wrapper} direction="row" spacing={10}>
-              <Sidebar workspace={settings.workspace} username={username} />
-              <Suspense fallback={<Loader />}>
-                <main className={styles.content}>
-                  <Outlet />
-                </main>
-              </Suspense>
-            </Stack>
-          </Margins>
-        </WorkspaceSettingsContext.Provider>
-      ) : (
-        <Loader />
-      )}
-    </>
-  )
-}
+	return (
+		<>
+			<Helmet>
+				<title>{pageTitle(workspaceName, "Settings")}</title>
+			</Helmet>
 
-const useStyles = makeStyles((theme) => ({
-  wrapper: {
-    padding: theme.spacing(6, 0),
-  },
-
-  content: {
-    width: "100%",
-  },
-}))
+			<Margins>
+				<Stack css={{ padding: "48px 0" }} direction="row" spacing={10}>
+					{isError ? (
+						<ErrorAlert error={error} />
+					) : (
+						<WorkspaceSettings.Provider value={workspace}>
+							<Sidebar workspace={workspace} username={username} />
+							<Suspense fallback={<Loader />}>
+								<main css={{ width: "100%" }}>
+									<Outlet />
+								</main>
+							</Suspense>
+						</WorkspaceSettings.Provider>
+					)}
+				</Stack>
+			</Margins>
+		</>
+	);
+};

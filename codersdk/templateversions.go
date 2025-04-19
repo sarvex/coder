@@ -9,12 +9,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	previewtypes "github.com/coder/preview/types"
 )
 
 type TemplateVersionWarning string
 
 const (
-	TemplateVersionWarningDeprecatedParameters TemplateVersionWarning = "DEPRECATED_PARAMETERS"
+	TemplateVersionWarningUnsupportedWorkspaces TemplateVersionWarning = "UNSUPPORTED_WORKSPACES"
 )
 
 // TemplateVersion represents a single version of a template.
@@ -25,18 +27,24 @@ type TemplateVersion struct {
 	CreatedAt      time.Time      `json:"created_at" format:"date-time"`
 	UpdatedAt      time.Time      `json:"updated_at" format:"date-time"`
 	Name           string         `json:"name"`
+	Message        string         `json:"message"`
 	Job            ProvisionerJob `json:"job"`
 	Readme         string         `json:"readme"`
-	CreatedBy      User           `json:"created_by"`
+	CreatedBy      MinimalUser    `json:"created_by"`
+	Archived       bool           `json:"archived"`
 
-	Warnings []TemplateVersionWarning `json:"warnings,omitempty" enums:"DEPRECATED_PARAMETERS"`
+	Warnings            []TemplateVersionWarning `json:"warnings,omitempty" enums:"DEPRECATED_PARAMETERS"`
+	MatchedProvisioners *MatchedProvisioners     `json:"matched_provisioners,omitempty"`
 }
 
-type TemplateVersionGitAuth struct {
-	ID              string      `json:"id"`
-	Type            GitProvider `json:"type"`
-	AuthenticateURL string      `json:"authenticate_url"`
-	Authenticated   bool        `json:"authenticated"`
+type TemplateVersionExternalAuth struct {
+	ID              string `json:"id"`
+	Type            string `json:"type"`
+	DisplayName     string `json:"display_name"`
+	DisplayIcon     string `json:"display_icon"`
+	AuthenticateURL string `json:"authenticate_url"`
+	Authenticated   bool   `json:"authenticated"`
+	Optional        bool   `json:"optional,omitempty"`
 }
 
 type ValidationMonotonicOrder string
@@ -59,11 +67,11 @@ type TemplateVersionParameter struct {
 	Options              []TemplateVersionParameterOption `json:"options"`
 	ValidationError      string                           `json:"validation_error,omitempty"`
 	ValidationRegex      string                           `json:"validation_regex,omitempty"`
-	ValidationMin        int32                            `json:"validation_min,omitempty"`
-	ValidationMax        int32                            `json:"validation_max,omitempty"`
+	ValidationMin        *int32                           `json:"validation_min,omitempty"`
+	ValidationMax        *int32                           `json:"validation_max,omitempty"`
 	ValidationMonotonic  ValidationMonotonicOrder         `json:"validation_monotonic,omitempty" enums:"increasing,decreasing"`
 	Required             bool                             `json:"required"`
-	LegacyVariableName   string                           `json:"legacy_variable_name,omitempty"`
+	Ephemeral            bool                             `json:"ephemeral"`
 }
 
 // TemplateVersionParameterOption represents a selectable option for a template parameter.
@@ -86,7 +94,8 @@ type TemplateVersionVariable struct {
 }
 
 type PatchTemplateVersionRequest struct {
-	Name string `json:"name" validate:"omitempty,template_version_name"`
+	Name    string  `json:"name" validate:"omitempty,template_version_name"`
+	Message *string `json:"message,omitempty" validate:"omitempty,lt=1048577"`
 }
 
 // TemplateVersion returns a template version by ID.
@@ -116,6 +125,20 @@ func (c *Client) CancelTemplateVersion(ctx context.Context, version uuid.UUID) e
 	return nil
 }
 
+type DynamicParametersRequest struct {
+	// ID identifies the request. The response contains the same
+	// ID so that the client can match it to the request.
+	ID     int               `json:"id"`
+	Inputs map[string]string `json:"inputs"`
+}
+
+type DynamicParametersResponse struct {
+	ID          int                      `json:"id"`
+	Diagnostics previewtypes.Diagnostics `json:"diagnostics"`
+	Parameters  []previewtypes.Parameter `json:"parameters"`
+	// TODO: Workspace tags
+}
+
 // TemplateVersionParameters returns parameters a template version exposes.
 func (c *Client) TemplateVersionRichParameters(ctx context.Context, version uuid.UUID) ([]TemplateVersionParameter, error) {
 	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/templateversions/%s/rich-parameters", version), nil)
@@ -130,9 +153,9 @@ func (c *Client) TemplateVersionRichParameters(ctx context.Context, version uuid
 	return params, json.NewDecoder(res.Body).Decode(&params)
 }
 
-// TemplateVersionGitAuth returns git authentication for the requested template version.
-func (c *Client) TemplateVersionGitAuth(ctx context.Context, version uuid.UUID) ([]TemplateVersionGitAuth, error) {
-	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/templateversions/%s/gitauth", version), nil)
+// TemplateVersionExternalAuth returns authentication providers for the requested template version.
+func (c *Client) TemplateVersionExternalAuth(ctx context.Context, version uuid.UUID) ([]TemplateVersionExternalAuth, error) {
+	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/templateversions/%s/external-auth", version), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -140,36 +163,8 @@ func (c *Client) TemplateVersionGitAuth(ctx context.Context, version uuid.UUID) 
 	if res.StatusCode != http.StatusOK {
 		return nil, ReadBodyAsError(res)
 	}
-	var gitAuth []TemplateVersionGitAuth
-	return gitAuth, json.NewDecoder(res.Body).Decode(&gitAuth)
-}
-
-// TemplateVersionSchema returns schemas for a template version by ID.
-func (c *Client) TemplateVersionSchema(ctx context.Context, version uuid.UUID) ([]ParameterSchema, error) {
-	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/templateversions/%s/schema", version), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return nil, ReadBodyAsError(res)
-	}
-	var params []ParameterSchema
-	return params, json.NewDecoder(res.Body).Decode(&params)
-}
-
-// TemplateVersionParameters returns computed parameters for a template version.
-func (c *Client) TemplateVersionParameters(ctx context.Context, version uuid.UUID) ([]ComputedParameter, error) {
-	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/templateversions/%s/parameters", version), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return nil, ReadBodyAsError(res)
-	}
-	var params []ComputedParameter
-	return params, json.NewDecoder(res.Body).Decode(&params)
+	var extAuth []TemplateVersionExternalAuth
+	return extAuth, json.NewDecoder(res.Body).Decode(&extAuth)
 }
 
 // TemplateVersionResources returns resources a template version declares.
@@ -209,7 +204,6 @@ func (c *Client) TemplateVersionLogsAfter(ctx context.Context, version uuid.UUID
 // CreateTemplateVersionDryRun.
 type CreateTemplateVersionDryRunRequest struct {
 	WorkspaceName       string                    `json:"workspace_name"`
-	ParameterValues     []CreateParameterRequest  `json:"parameter_values"`
 	RichParameterValues []WorkspaceBuildParameter `json:"rich_parameter_values"`
 	UserVariableValues  []VariableValue           `json:"user_variable_values,omitempty"`
 }
@@ -244,6 +238,22 @@ func (c *Client) TemplateVersionDryRun(ctx context.Context, version, job uuid.UU
 
 	var j ProvisionerJob
 	return j, json.NewDecoder(res.Body).Decode(&j)
+}
+
+// TemplateVersionDryRunMatchedProvisioners returns the matched provisioners for a
+// template version dry-run job.
+func (c *Client) TemplateVersionDryRunMatchedProvisioners(ctx context.Context, version, job uuid.UUID) (MatchedProvisioners, error) {
+	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/templateversions/%s/dry-run/%s/matched-provisioners", version, job), nil)
+	if err != nil {
+		return MatchedProvisioners{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return MatchedProvisioners{}, ReadBodyAsError(res)
+	}
+
+	var matched MatchedProvisioners
+	return matched, json.NewDecoder(res.Body).Decode(&matched)
 }
 
 // TemplateVersionDryRunResources returns the resources of a finished template

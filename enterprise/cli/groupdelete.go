@@ -5,28 +5,30 @@ import (
 
 	"golang.org/x/xerrors"
 
-	agpl "github.com/coder/coder/cli"
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/cliui"
-	"github.com/coder/coder/codersdk"
+	agpl "github.com/coder/coder/v2/cli"
+	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/pretty"
+	"github.com/coder/serpent"
 )
 
-func (r *RootCmd) groupDelete() *clibase.Cmd {
+func (r *RootCmd) groupDelete() *serpent.Command {
+	orgContext := agpl.NewOrganizationContext()
 	client := new(codersdk.Client)
-	cmd := &clibase.Cmd{
+	cmd := &serpent.Command{
 		Use:   "delete <name>",
 		Short: "Delete a user group",
-		Middleware: clibase.Chain(
-			clibase.RequireNArgs(1),
+		Middleware: serpent.Chain(
+			serpent.RequireNArgs(1),
 			r.InitClient(client),
 		),
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			var (
 				ctx       = inv.Context()
 				groupName = inv.Args[0]
 			)
 
-			org, err := agpl.CurrentOrganization(inv, client)
+			org, err := orgContext.Selected(inv, client)
 			if err != nil {
 				return xerrors.Errorf("current organization: %w", err)
 			}
@@ -41,10 +43,11 @@ func (r *RootCmd) groupDelete() *clibase.Cmd {
 				return xerrors.Errorf("delete group: %w", err)
 			}
 
-			_, _ = fmt.Fprintf(inv.Stdout, "Successfully deleted group %s!\n", cliui.Styles.Keyword.Render(group.Name))
+			_, _ = fmt.Fprintf(inv.Stdout, "Successfully deleted group %s!\n", pretty.Sprint(cliui.DefaultStyles.Keyword, group.Name))
 			return nil
 		},
 	}
+	orgContext.AttachOptions(cmd)
 
 	return cmd
 }

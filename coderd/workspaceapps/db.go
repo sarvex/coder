@@ -3,22 +3,33 @@ package workspaceapps
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog"
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/database/dbauthz"
-	"github.com/coder/coder/coderd/httpapi"
-	"github.com/coder/coder/coderd/httpmw"
-	"github.com/coder/coder/coderd/rbac"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/coderd/audit"
+	"github.com/coder/coder/v2/coderd/cryptokeys"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbauthz"
+	"github.com/coder/coder/v2/coderd/database/dbtime"
+	"github.com/coder/coder/v2/coderd/httpapi"
+	"github.com/coder/coder/v2/coderd/httpmw"
+	"github.com/coder/coder/v2/coderd/jwtutils"
+	"github.com/coder/coder/v2/coderd/rbac"
+	"github.com/coder/coder/v2/coderd/rbac/policy"
+	"github.com/coder/coder/v2/coderd/tracing"
+	"github.com/coder/coder/v2/codersdk"
 )
 
 // DBTokenProvider provides authentication and authorization for workspace apps
@@ -27,36 +38,53 @@ type DBTokenProvider struct {
 	Logger slog.Logger
 
 	// DashboardURL is the main dashboard access URL for error pages.
-	DashboardURL                  *url.URL
-	Authorizer                    rbac.Authorizer
-	Database                      database.Store
-	DeploymentValues              *codersdk.DeploymentValues
-	OAuth2Configs                 *httpmw.OAuth2Configs
-	WorkspaceAgentInactiveTimeout time.Duration
-	SigningKey                    SecurityKey
+	DashboardURL                    *url.URL
+	Authorizer                      rbac.Authorizer
+	Auditor                         *atomic.Pointer[audit.Auditor]
+	Database                        database.Store
+	DeploymentValues                *codersdk.DeploymentValues
+	OAuth2Configs                   *httpmw.OAuth2Configs
+	WorkspaceAgentInactiveTimeout   time.Duration
+	WorkspaceAppAuditSessionTimeout time.Duration
+	Keycache                        cryptokeys.SigningKeycache
 }
 
 var _ SignedTokenProvider = &DBTokenProvider{}
 
-func NewDBTokenProvider(log slog.Logger, accessURL *url.URL, authz rbac.Authorizer, db database.Store, cfg *codersdk.DeploymentValues, oauth2Cfgs *httpmw.OAuth2Configs, workspaceAgentInactiveTimeout time.Duration, signingKey SecurityKey) SignedTokenProvider {
+func NewDBTokenProvider(log slog.Logger,
+	accessURL *url.URL,
+	authz rbac.Authorizer,
+	auditor *atomic.Pointer[audit.Auditor],
+	db database.Store,
+	cfg *codersdk.DeploymentValues,
+	oauth2Cfgs *httpmw.OAuth2Configs,
+	workspaceAgentInactiveTimeout time.Duration,
+	workspaceAppAuditSessionTimeout time.Duration,
+	signer cryptokeys.SigningKeycache,
+) SignedTokenProvider {
 	if workspaceAgentInactiveTimeout == 0 {
 		workspaceAgentInactiveTimeout = 1 * time.Minute
 	}
+	if workspaceAppAuditSessionTimeout == 0 {
+		workspaceAppAuditSessionTimeout = time.Hour
+	}
 
 	return &DBTokenProvider{
-		Logger:                        log,
-		DashboardURL:                  accessURL,
-		Authorizer:                    authz,
-		Database:                      db,
-		DeploymentValues:              cfg,
-		OAuth2Configs:                 oauth2Cfgs,
-		WorkspaceAgentInactiveTimeout: workspaceAgentInactiveTimeout,
-		SigningKey:                    signingKey,
+		Logger:                          log,
+		DashboardURL:                    accessURL,
+		Authorizer:                      authz,
+		Auditor:                         auditor,
+		Database:                        db,
+		DeploymentValues:                cfg,
+		OAuth2Configs:                   oauth2Cfgs,
+		WorkspaceAgentInactiveTimeout:   workspaceAgentInactiveTimeout,
+		WorkspaceAppAuditSessionTimeout: workspaceAppAuditSessionTimeout,
+		Keycache:                        signer,
 	}
 }
 
 func (p *DBTokenProvider) FromRequest(r *http.Request) (*SignedToken, bool) {
-	return FromRequest(r, p.SigningKey)
+	return FromRequest(r, p.Keycache)
 }
 
 func (p *DBTokenProvider) Issue(ctx context.Context, rw http.ResponseWriter, r *http.Request, issueReq IssueTokenRequest) (*SignedToken, string, bool) {
@@ -67,8 +95,11 @@ func (p *DBTokenProvider) Issue(ctx context.Context, rw http.ResponseWriter, r *
 	//                 // permissions.
 	dangerousSystemCtx := dbauthz.AsSystemRestricted(ctx)
 
+	aReq, commitAudit := p.auditInitRequest(ctx, rw, r)
+	defer commitAudit()
+
 	appReq := issueReq.AppRequest.Normalize()
-	err := appReq.Validate()
+	err := appReq.Check()
 	if err != nil {
 		WriteWorkspaceApp500(p.Logger, p.DashboardURL, rw, r, &appReq, err, "invalid app request")
 		return nil, "", false
@@ -84,12 +115,12 @@ func (p *DBTokenProvider) Issue(ctx context.Context, rw http.ResponseWriter, r *
 		DB:                          p.Database,
 		OAuth2Configs:               p.OAuth2Configs,
 		RedirectToLogin:             false,
-		DisableSessionExpiryRefresh: p.DeploymentValues.DisableSessionExpiryRefresh.Value(),
+		DisableSessionExpiryRefresh: p.DeploymentValues.Sessions.DisableExpiryRefresh.Value(),
 		// Optional is true to allow for public apps. If the authorization check
 		// (later on) fails and the user is not authenticated, they will be
 		// redirected to the login page or app auth endpoint using code below.
 		Optional: true,
-		SessionTokenFunc: func(r *http.Request) string {
+		SessionTokenFunc: func(_ *http.Request) string {
 			return issueReq.SessionToken
 		},
 	})
@@ -97,15 +128,24 @@ func (p *DBTokenProvider) Issue(ctx context.Context, rw http.ResponseWriter, r *
 		return nil, "", false
 	}
 
+	aReq.apiKey = apiKey // Update audit request.
+
 	// Lookup workspace app details from DB.
 	dbReq, err := appReq.getDatabase(dangerousSystemCtx, p.Database)
-	if xerrors.Is(err, sql.ErrNoRows) {
-		WriteWorkspaceApp404(p.Logger, p.DashboardURL, rw, r, &appReq, err.Error())
+	switch {
+	case xerrors.Is(err, sql.ErrNoRows):
+		WriteWorkspaceApp404(p.Logger, p.DashboardURL, rw, r, &appReq, nil, err.Error())
 		return nil, "", false
-	} else if err != nil {
+	case xerrors.Is(err, errWorkspaceStopped):
+		WriteWorkspaceOffline(p.Logger, p.DashboardURL, rw, r, &appReq)
+		return nil, "", false
+	case err != nil:
 		WriteWorkspaceApp500(p.Logger, p.DashboardURL, rw, r, &appReq, err, "get app details from database")
 		return nil, "", false
 	}
+
+	aReq.dbReq = dbReq // Update audit request.
+
 	token.UserID = dbReq.User.ID
 	token.WorkspaceID = dbReq.Workspace.ID
 	token.AgentID = dbReq.Agent.ID
@@ -114,7 +154,7 @@ func (p *DBTokenProvider) Issue(ctx context.Context, rw http.ResponseWriter, r *
 	}
 
 	// Verify the user has access to the app.
-	authed, err := p.authorizeRequest(r.Context(), authz, dbReq)
+	authed, warnings, err := p.authorizeRequest(r.Context(), authz, dbReq)
 	if err != nil {
 		WriteWorkspaceApp500(p.Logger, p.DashboardURL, rw, r, &appReq, err, "verify authz")
 		return nil, "", false
@@ -122,7 +162,7 @@ func (p *DBTokenProvider) Issue(ctx context.Context, rw http.ResponseWriter, r *
 	if !authed {
 		if apiKey != nil {
 			// The request has a valid API key but insufficient permissions.
-			WriteWorkspaceApp404(p.Logger, p.DashboardURL, rw, r, &appReq, "insufficient permissions")
+			WriteWorkspaceApp404(p.Logger, p.DashboardURL, rw, r, &appReq, warnings, "insufficient permissions")
 			return nil, "", false
 		}
 
@@ -194,11 +234,9 @@ func (p *DBTokenProvider) Issue(ctx context.Context, rw http.ResponseWriter, r *
 		return nil, "", false
 	}
 
-	// Check that the app is healthy.
-	if dbReq.AppHealth != "" && dbReq.AppHealth != database.WorkspaceAppHealthDisabled && dbReq.AppHealth != database.WorkspaceAppHealthHealthy {
-		WriteWorkspaceAppOffline(p.Logger, p.DashboardURL, rw, r, &appReq, fmt.Sprintf("App health is %q, not %q", dbReq.AppHealth, database.WorkspaceAppHealthHealthy))
-		return nil, "", false
-	}
+	// This is where we used to check app health, but we don't do that anymore
+	// in case there are bugs with the healthcheck code that lock users out of
+	// their apps completely.
 
 	// As a sanity check, ensure the token we just made is valid for this
 	// request.
@@ -207,9 +245,11 @@ func (p *DBTokenProvider) Issue(ctx context.Context, rw http.ResponseWriter, r *
 		return nil, "", false
 	}
 
+	token.RegisteredClaims = jwtutils.RegisteredClaims{
+		Expiry: jwt.NewNumericDate(time.Now().Add(DefaultTokenExpiry)),
+	}
 	// Sign the token.
-	token.Expiry = time.Now().Add(DefaultTokenExpiry)
-	tokenStr, err := p.SigningKey.SignToken(token)
+	tokenStr, err := jwtutils.Sign(ctx, p.Keycache, token)
 	if err != nil {
 		WriteWorkspaceApp500(p.Logger, p.DashboardURL, rw, r, &appReq, err, "generate token")
 		return nil, "", false
@@ -218,7 +258,12 @@ func (p *DBTokenProvider) Issue(ctx context.Context, rw http.ResponseWriter, r *
 	return &token, tokenStr, true
 }
 
-func (p *DBTokenProvider) authorizeRequest(ctx context.Context, roles *httpmw.Authorization, dbReq *databaseRequest) (bool, error) {
+// authorizeRequest returns true/false if the request is authorized. The returned []string
+// are warnings that aid in debugging. These messages do not prevent authorization,
+// but may indicate that the request is not configured correctly.
+// If an error is returned, the request should be aborted with a 500 error.
+func (p *DBTokenProvider) authorizeRequest(ctx context.Context, roles *rbac.Subject, dbReq *databaseRequest) (bool, []string, error) {
+	var warnings []string
 	accessMethod := dbReq.AccessMethod
 	if accessMethod == "" {
 		accessMethod = AccessMethodPath
@@ -233,6 +278,14 @@ func (p *DBTokenProvider) authorizeRequest(ctx context.Context, roles *httpmw.Au
 	// Dangerous.AllowPathAppSiteOwnerAccess flag is enabled in the check below.
 	sharingLevel := dbReq.AppSharingLevel
 	if isPathApp && !p.DeploymentValues.Dangerous.AllowPathAppSharing.Value() {
+		if dbReq.AppSharingLevel != database.AppSharingLevelOwner {
+			// This is helpful for debugging, and ok to leak to the user.
+			// This is because the app has the sharing level set to something that
+			// should be shared, but we are disabling it from a deployment wide
+			// flag. So the template should be fixed to set the sharing level to
+			// "owner" instead and this will not appear.
+			warnings = append(warnings, fmt.Sprintf("unable to use configured sharing level %q because path-based app sharing is disabled (see --dangerous-allow-path-app-sharing), using sharing level \"owner\" instead", sharingLevel))
+		}
 		sharingLevel = database.AppSharingLevelOwner
 	}
 
@@ -240,7 +293,7 @@ func (p *DBTokenProvider) authorizeRequest(ctx context.Context, roles *httpmw.Au
 	if roles == nil {
 		// The user is not authenticated, so they can only access the app if it
 		// is public.
-		return sharingLevel == database.AppSharingLevelPublic, nil
+		return sharingLevel == database.AppSharingLevelPublic, warnings, nil
 	}
 
 	// Block anyone from accessing workspaces they don't own in path-based apps
@@ -252,24 +305,30 @@ func (p *DBTokenProvider) authorizeRequest(ctx context.Context, roles *httpmw.Au
 	// workspaces owned by different users.
 	if isPathApp &&
 		sharingLevel == database.AppSharingLevelOwner &&
-		dbReq.Workspace.OwnerID.String() != roles.Actor.ID &&
+		dbReq.Workspace.OwnerID.String() != roles.ID &&
 		!p.DeploymentValues.Dangerous.AllowPathAppSiteOwnerAccess.Value() {
-		return false, nil
+		// This is not ideal to check for the 'owner' role, but we are only checking
+		// to determine whether to show a warning for debugging reasons. This does
+		// not do any authz checks, so it is ok.
+		if roles != nil && slices.Contains(roles.Roles.Names(), rbac.RoleOwner()) {
+			warnings = append(warnings, "path-based apps with \"owner\" share level are only accessible by the workspace owner (see --dangerous-allow-path-app-site-owner-access)")
+		}
+		return false, warnings, nil
 	}
 
 	// Figure out which RBAC resource to check. For terminals we use execution
 	// instead of application connect.
 	var (
-		rbacAction   rbac.Action = rbac.ActionCreate
-		rbacResource rbac.Object = dbReq.Workspace.ApplicationConnectRBAC()
+		rbacAction   policy.Action = policy.ActionApplicationConnect
+		rbacResource rbac.Object   = dbReq.Workspace.RBACObject()
 		// rbacResourceOwned is for the level "authenticated". We still need to
 		// make sure the API key has permissions to connect to the actor's own
 		// workspace. Scopes would prevent this.
-		rbacResourceOwned rbac.Object = rbac.ResourceWorkspaceApplicationConnect.WithOwner(roles.Actor.ID)
+		rbacResourceOwned rbac.Object = rbac.ResourceWorkspace.WithOwner(roles.ID)
 	)
 	if dbReq.AccessMethod == AccessMethodTerminal {
-		rbacResource = dbReq.Workspace.ExecutionRBAC()
-		rbacResourceOwned = rbac.ResourceWorkspaceExecution.WithOwner(roles.Actor.ID)
+		rbacAction = policy.ActionSSH
+		rbacResourceOwned = rbac.ResourceWorkspace.WithOwner(roles.ID)
 	}
 
 	// Do a standard RBAC check. This accounts for share level "owner" and any
@@ -278,9 +337,9 @@ func (p *DBTokenProvider) authorizeRequest(ctx context.Context, roles *httpmw.Au
 	// Regardless of share level or whether it's enabled or not, the owner of
 	// the workspace can always access applications (as long as their API key's
 	// scope allows it).
-	err := p.Authorizer.Authorize(ctx, roles.Actor, rbacAction, rbacResource)
+	err := p.Authorizer.Authorize(ctx, *roles, rbacAction, rbacResource)
 	if err == nil {
-		return true, nil
+		return true, []string{}, nil
 	}
 
 	switch sharingLevel {
@@ -291,17 +350,191 @@ func (p *DBTokenProvider) authorizeRequest(ctx context.Context, roles *httpmw.Au
 	case database.AppSharingLevelAuthenticated:
 		// Check with the owned resource to ensure the API key has permissions
 		// to connect to the actor's own workspace. This enforces scopes.
-		err := p.Authorizer.Authorize(ctx, roles.Actor, rbacAction, rbacResourceOwned)
+		err := p.Authorizer.Authorize(ctx, *roles, rbacAction, rbacResourceOwned)
 		if err == nil {
-			return true, nil
+			return true, []string{}, nil
 		}
 	case database.AppSharingLevelPublic:
 		// We don't really care about scopes and stuff if it's public anyways.
 		// Someone with a restricted-scope API key could just not submit the API
 		// key cookie in the request and access the page.
-		return true, nil
+		return true, []string{}, nil
 	}
 
 	// No checks were successful.
-	return false, nil
+	return false, warnings, nil
+}
+
+type auditRequest struct {
+	time   time.Time
+	apiKey *database.APIKey
+	dbReq  *databaseRequest
+}
+
+// auditInitRequest creates a new audit session and audit log for the given
+// request, if one does not already exist. If an audit session already exists,
+// it will be updated with the current timestamp. A session is used to reduce
+// the number of audit logs created.
+//
+// A session is unique to the agent, app, user and users IP. If any of these
+// values change, a new session and audit log is created.
+func (p *DBTokenProvider) auditInitRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) (aReq *auditRequest, commit func()) {
+	// Get the status writer from the request context so we can figure
+	// out the HTTP status and autocommit the audit log.
+	sw, ok := w.(*tracing.StatusWriter)
+	if !ok {
+		panic("dev error: http.ResponseWriter is not *tracing.StatusWriter")
+	}
+
+	aReq = &auditRequest{
+		time: dbtime.Now(),
+	}
+
+	// Set the commit function on the status writer to create an audit
+	// log, this ensures that the status and response body are available.
+	var committed bool
+	return aReq, func() {
+		if committed {
+			return
+		}
+		committed = true
+
+		if aReq.dbReq == nil {
+			// App doesn't exist, there's information in the Request
+			// struct but we need UUIDs for audit logging.
+			return
+		}
+
+		userID := uuid.Nil
+		if aReq.apiKey != nil {
+			userID = aReq.apiKey.UserID
+		}
+		userAgent := r.UserAgent()
+		ip := r.RemoteAddr
+
+		// Approximation of the status code.
+		statusCode := sw.Status
+		if statusCode == 0 {
+			statusCode = http.StatusOK
+		}
+
+		type additionalFields struct {
+			audit.AdditionalFields
+			SlugOrPort string `json:"slug_or_port,omitempty"`
+		}
+		appInfo := additionalFields{
+			AdditionalFields: audit.AdditionalFields{
+				WorkspaceOwner: aReq.dbReq.Workspace.OwnerUsername,
+				WorkspaceName:  aReq.dbReq.Workspace.Name,
+				WorkspaceID:    aReq.dbReq.Workspace.ID,
+			},
+		}
+		switch {
+		case aReq.dbReq.AccessMethod == AccessMethodTerminal:
+			appInfo.SlugOrPort = "terminal"
+		case aReq.dbReq.App.ID == uuid.Nil:
+			// If this isn't an app or a terminal, it's a port.
+			appInfo.SlugOrPort = aReq.dbReq.AppSlugOrPort
+		}
+
+		// If we end up logging, ensure relevant fields are set.
+		logger := p.Logger.With(
+			slog.F("workspace_id", aReq.dbReq.Workspace.ID),
+			slog.F("agent_id", aReq.dbReq.Agent.ID),
+			slog.F("app_id", aReq.dbReq.App.ID),
+			slog.F("user_id", userID),
+			slog.F("user_agent", userAgent),
+			slog.F("app_slug_or_port", appInfo.SlugOrPort),
+			slog.F("status_code", statusCode),
+		)
+
+		var newOrStale bool
+		err := p.Database.InTx(func(tx database.Store) (err error) {
+			// nolint:gocritic // System context is needed to write audit sessions.
+			dangerousSystemCtx := dbauthz.AsSystemRestricted(ctx)
+
+			newOrStale, err = tx.UpsertWorkspaceAppAuditSession(dangerousSystemCtx, database.UpsertWorkspaceAppAuditSessionParams{
+				// Config.
+				StaleIntervalMS: p.WorkspaceAppAuditSessionTimeout.Milliseconds(),
+
+				// Data.
+				ID:         uuid.New(),
+				AgentID:    aReq.dbReq.Agent.ID,
+				AppID:      aReq.dbReq.App.ID, // Can be unset, in which case uuid.Nil is fine.
+				UserID:     userID,            // Can be unset, in which case uuid.Nil is fine.
+				Ip:         ip,
+				UserAgent:  userAgent,
+				SlugOrPort: appInfo.SlugOrPort,
+				// #nosec G115 - Safe conversion as HTTP status code is expected to be within int32 range (typically 100-599)
+				StatusCode: int32(statusCode),
+				StartedAt:  aReq.time,
+				UpdatedAt:  aReq.time,
+			})
+			if err != nil {
+				return xerrors.Errorf("insert workspace app audit session: %w", err)
+			}
+
+			return nil
+		}, nil)
+		if err != nil {
+			logger.Error(ctx, "update workspace app audit session failed", slog.Error(err))
+
+			// Avoid spamming the audit log if deduplication failed, this should
+			// only happen if there are problems communicating with the database.
+			return
+		}
+
+		if !newOrStale {
+			// We either didn't insert a new session, or the session
+			// didn't timeout due to inactivity.
+			return
+		}
+
+		// Marshal additional fields only if we're writing an audit log entry.
+		appInfoBytes, err := json.Marshal(appInfo)
+		if err != nil {
+			logger.Error(ctx, "marshal additional fields failed", slog.Error(err))
+		}
+
+		// We use the background audit function instead of init request
+		// here because we don't know the resource type ahead of time.
+		// This also allows us to log unauthenticated access.
+		auditor := *p.Auditor.Load()
+		requestID := httpmw.RequestID(r)
+		switch {
+		case aReq.dbReq.App.ID != uuid.Nil:
+			audit.BackgroundAudit(ctx, &audit.BackgroundAuditParams[database.WorkspaceApp]{
+				Audit: auditor,
+				Log:   logger,
+
+				Action:           database.AuditActionOpen,
+				OrganizationID:   aReq.dbReq.Workspace.OrganizationID,
+				UserID:           userID,
+				RequestID:        requestID,
+				Time:             aReq.time,
+				Status:           statusCode,
+				IP:               ip,
+				UserAgent:        userAgent,
+				New:              aReq.dbReq.App,
+				AdditionalFields: appInfoBytes,
+			})
+		default:
+			// Web terminal, port app, etc.
+			audit.BackgroundAudit(ctx, &audit.BackgroundAuditParams[database.WorkspaceAgent]{
+				Audit: auditor,
+				Log:   logger,
+
+				Action:           database.AuditActionOpen,
+				OrganizationID:   aReq.dbReq.Workspace.OrganizationID,
+				UserID:           userID,
+				RequestID:        requestID,
+				Time:             aReq.time,
+				Status:           statusCode,
+				IP:               ip,
+				UserAgent:        userAgent,
+				New:              aReq.dbReq.Agent,
+				AdditionalFields: appInfoBytes,
+			})
+		}
+	}
 }

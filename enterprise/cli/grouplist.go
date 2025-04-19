@@ -7,30 +7,31 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
-	agpl "github.com/coder/coder/cli"
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/cliui"
-	"github.com/coder/coder/codersdk"
+	agpl "github.com/coder/coder/v2/cli"
+	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/serpent"
 )
 
-func (r *RootCmd) groupList() *clibase.Cmd {
+func (r *RootCmd) groupList() *serpent.Command {
 	formatter := cliui.NewOutputFormatter(
 		cliui.TableFormat([]groupTableRow{}, nil),
 		cliui.JSONFormat(),
 	)
+	orgContext := agpl.NewOrganizationContext()
 
 	client := new(codersdk.Client)
-	cmd := &clibase.Cmd{
+	cmd := &serpent.Command{
 		Use:   "list",
 		Short: "List user groups",
-		Middleware: clibase.Chain(
-			clibase.RequireNArgs(0),
+		Middleware: serpent.Chain(
+			serpent.RequireNArgs(0),
 			r.InitClient(client),
 		),
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			ctx := inv.Context()
 
-			org, err := agpl.CurrentOrganization(inv, client)
+			org, err := orgContext.Selected(inv, client)
 			if err != nil {
 				return xerrors.Errorf("current organization: %w", err)
 			}
@@ -58,6 +59,7 @@ func (r *RootCmd) groupList() *clibase.Cmd {
 	}
 
 	formatter.AttachOptions(&cmd.Options)
+	orgContext.AttachOptions(cmd)
 	return cmd
 }
 
@@ -67,9 +69,10 @@ type groupTableRow struct {
 
 	// For table output:
 	Name           string    `json:"-" table:"name,default_sort"`
-	OrganizationID uuid.UUID `json:"-" table:"organization_id"`
+	DisplayName    string    `json:"-" table:"display name"`
+	OrganizationID uuid.UUID `json:"-" table:"organization id"`
 	Members        []string  `json:"-" table:"members"`
-	AvatarURL      string    `json:"-" table:"avatar_url"`
+	AvatarURL      string    `json:"-" table:"avatar url"`
 }
 
 func groupsToRows(groups ...codersdk.Group) []groupTableRow {
@@ -81,6 +84,7 @@ func groupsToRows(groups ...codersdk.Group) []groupTableRow {
 		}
 		rows = append(rows, groupTableRow{
 			Name:           group.Name,
+			DisplayName:    group.DisplayName,
 			OrganizationID: group.OrganizationID,
 			AvatarURL:      group.AvatarURL,
 			Members:        members,

@@ -16,12 +16,36 @@ import (
 )
 
 const (
-	apiSubdir       = "api"
+	apiSubdir       = "reference/api"
 	apiIndexFile    = "index.md"
-	apiIndexContent = `Get started with Coder API:
+	apiIndexContent = `# API
+
+Get started with the Coder API:
+
+## Quickstart
+
+Generate a token on your Coder deployment by visiting:
+
+` + "````shell" + `
+https://coder.example.com/settings/tokens
+` + "````" + `
+
+List your workspaces
+
+` + "````shell" + `
+# CLI
+curl https://coder.example.com/api/v2/workspaces?q=owner:me \
+-H "Coder-Session-Token: <your-token>"
+` + "````" + `
+
+## Use cases
+
+See some common [use cases](../../reference/index.md#use-cases) for the REST API.
+
+## Sections
 
 <children>
-  This page is rendered on https://coder.com/docs/coder-oss/api. Refer to the other documents in the ` + "`" + `api/` + "`" + ` directory.
+  This page is rendered on https://coder.com/docs/reference/api. Refer to the other documents in the ` + "`api/`" + ` directory.
 </children>
 `
 )
@@ -147,12 +171,12 @@ func writeDocs(sections [][]byte) error {
 
 	// Update manifest.json
 	type route struct {
-		Title       string  `json:"title,omitempty"`
-		Description string  `json:"description,omitempty"`
-		Path        string  `json:"path,omitempty"`
-		IconPath    string  `json:"icon_path,omitempty"`
-		State       string  `json:"state,omitempty"`
-		Children    []route `json:"children,omitempty"`
+		Title       string   `json:"title,omitempty"`
+		Description string   `json:"description,omitempty"`
+		Path        string   `json:"path,omitempty"`
+		IconPath    string   `json:"icon_path,omitempty"`
+		State       []string `json:"state,omitempty"`
+		Children    []route  `json:"children,omitempty"`
 	}
 
 	type manifest struct {

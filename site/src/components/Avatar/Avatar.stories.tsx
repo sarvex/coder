@@ -1,61 +1,76 @@
-import { Story } from "@storybook/react"
-import { Avatar, AvatarIcon, AvatarProps } from "./Avatar"
-import PauseIcon from "@mui/icons-material/PauseOutlined"
+import type { Meta, StoryObj } from "@storybook/react";
+import { Avatar } from "./Avatar";
 
-export default {
-  title: "components/Avatar",
-  component: Avatar,
-}
+const meta: Meta<typeof Avatar> = {
+	title: "components/Avatar",
+	component: Avatar,
+	args: {
+		src: "https://github.com/kylecarbs.png",
+	},
+};
 
-const Template: Story<AvatarProps> = (args: AvatarProps) => <Avatar {...args} />
+export default meta;
+type Story = StoryObj<typeof Avatar>;
 
-export const Letter = Template.bind({})
-Letter.args = {
-  children: "Coder",
-}
+export const ImageLgSize: Story = {
+	args: { size: "lg" },
+};
 
-export const LetterXL = Template.bind({})
-LetterXL.args = {
-  children: "Coder",
-  size: "xl",
-}
+export const ImageMdSize: Story = {};
 
-export const LetterDarken = Template.bind({})
-LetterDarken.args = {
-  children: "Coder",
-  colorScheme: "darken",
-}
+export const ImageSmSize: Story = {
+	args: { size: "sm" },
+};
 
-export const Image = Template.bind({})
-Image.args = {
-  src: "https://avatars.githubusercontent.com/u/95932066?s=200&v=4",
-}
+export const IconLgSize: Story = {
+	args: {
+		size: "lg",
+		variant: "icon",
+		src: "https://em-content.zobj.net/source/apple/391/billed-cap_1f9e2.png",
+	},
+};
 
-export const ImageXL = Template.bind({})
-ImageXL.args = {
-  src: "https://avatars.githubusercontent.com/u/95932066?s=200&v=4",
-  size: "xl",
-}
+export const IconMdSize: Story = {
+	args: {
+		variant: "icon",
+		src: "https://em-content.zobj.net/source/apple/391/billed-cap_1f9e2.png",
+	},
+};
 
-export const MuiIcon = Template.bind({})
-MuiIcon.args = {
-  children: <PauseIcon />,
-}
+export const IconSmSize: Story = {
+	args: {
+		variant: "icon",
+		size: "sm",
+		src: "https://em-content.zobj.net/source/apple/391/billed-cap_1f9e2.png",
+	},
+};
 
-export const MuiIconDarken = Template.bind({})
-MuiIconDarken.args = {
-  children: <PauseIcon />,
-  colorScheme: "darken",
-}
+export const NonSquaredIcon: Story = {
+	args: {
+		variant: "icon",
+		src: "/icon/docker.png",
+	},
+};
 
-export const MuiIconXL = Template.bind({})
-MuiIconXL.args = {
-  children: <PauseIcon />,
-  size: "xl",
-}
+export const FallbackLgSize: Story = {
+	args: {
+		src: "",
+		size: "lg",
+		fallback: "Adriana Rodrigues",
+	},
+};
 
-export const AvatarIconDarken = Template.bind({})
-AvatarIconDarken.args = {
-  children: <AvatarIcon src="/icon/database.svg" />,
-  colorScheme: "darken",
-}
+export const FallbackMdSize: Story = {
+	args: {
+		src: "",
+		fallback: "Adriana Rodrigues",
+	},
+};
+
+export const FallbackSmSize: Story = {
+	args: {
+		src: "",
+		size: "sm",
+		fallback: "Adriana Rodrigues",
+	},
+};

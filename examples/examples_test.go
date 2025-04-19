@@ -10,13 +10,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/examples"
+	"github.com/coder/coder/v2/examples"
 )
 
 func TestTemplate(t *testing.T) {
 	t.Parallel()
 	list, err := examples.List()
-	require.NoError(t, err)
+	require.NoError(t, err, "error listing examples, run \"make gen\" to ensure examples are up to date")
 	require.NotEmpty(t, list)
 	for _, eg := range list {
 		eg := eg
@@ -51,6 +51,5 @@ func TestSubdirs(t *testing.T) {
 		entryPaths[header.Typeflag] = append(entryPaths[header.Typeflag], header.Name)
 	}
 
-	require.Subset(t, entryPaths[tar.TypeDir], []string{"build"})
-	require.Subset(t, entryPaths[tar.TypeReg], []string{"README.md", "main.tf", "build/Dockerfile"})
+	require.Subset(t, entryPaths[tar.TypeReg], []string{"README.md", "main.tf"})
 }

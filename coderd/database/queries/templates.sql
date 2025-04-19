@@ -2,7 +2,7 @@
 SELECT
 	*
 FROM
-	templates
+	template_with_names
 WHERE
 	id = $1
 LIMIT
@@ -12,7 +12,7 @@ LIMIT
 SELECT
 	*
 FROM
-	templates
+	template_with_names AS templates
 WHERE
 	-- Optionally include deleted templates
 	templates.deleted = @deleted
@@ -28,10 +28,27 @@ WHERE
 			LOWER("name") = LOWER(@exact_name)
 		ELSE true
 	END
+	-- Filter by name, matching on substring
+	AND CASE
+		WHEN @fuzzy_name :: text != '' THEN
+			lower(name) ILIKE '%' || lower(@fuzzy_name) || '%'
+		ELSE true
+	END
 	-- Filter by ids
 	AND CASE
 		WHEN array_length(@ids :: uuid[], 1) > 0 THEN
 			id = ANY(@ids)
+		ELSE true
+	END
+	-- Filter by deprecated
+	AND CASE
+		WHEN sqlc.narg('deprecated') :: boolean IS NOT NULL THEN
+			CASE
+				WHEN sqlc.narg('deprecated') :: boolean THEN
+					deprecated != ''
+				ELSE
+					deprecated = ''
+			END
 		ELSE true
 	END
   -- Authorize Filter clause will be injected below in GetAuthorizedTemplates
@@ -43,7 +60,7 @@ ORDER BY (name, id) ASC
 SELECT
 	*
 FROM
-	templates
+	template_with_names AS templates
 WHERE
 	organization_id = @organization_id
 	AND deleted = @deleted
@@ -52,11 +69,11 @@ LIMIT
 	1;
 
 -- name: GetTemplates :many
-SELECT * FROM templates
+SELECT * FROM template_with_names AS templates
 ORDER BY (name, id) ASC
 ;
 
--- name: InsertTemplate :one
+-- name: InsertTemplate :exec
 INSERT INTO
 	templates (
 		id,
@@ -72,10 +89,11 @@ INSERT INTO
 		user_acl,
 		group_acl,
 		display_name,
-		allow_user_cancel_workspace_jobs
+		allow_user_cancel_workspace_jobs,
+		max_port_sharing_level
 	)
 VALUES
-	($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *;
+	($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15);
 
 -- name: UpdateTemplateActiveVersionByID :exec
 UPDATE
@@ -95,7 +113,7 @@ SET
 WHERE
 	id = $1;
 
--- name: UpdateTemplateMetaByID :one
+-- name: UpdateTemplateMetaByID :exec
 UPDATE
 	templates
 SET
@@ -104,13 +122,14 @@ SET
 	name = $4,
 	icon = $5,
 	display_name = $6,
-	allow_user_cancel_workspace_jobs = $7
+	allow_user_cancel_workspace_jobs = $7,
+	group_acl = $8,
+	max_port_sharing_level = $9
 WHERE
 	id = $1
-RETURNING
-	*;
+;
 
--- name: UpdateTemplateScheduleByID :one
+-- name: UpdateTemplateScheduleByID :exec
 UPDATE
 	templates
 SET
@@ -118,15 +137,18 @@ SET
 	allow_user_autostart = $3,
 	allow_user_autostop = $4,
 	default_ttl = $5,
-	max_ttl = $6,
-	failure_ttl = $7,
-	inactivity_ttl = $8
+	activity_bump = $6,
+	autostop_requirement_days_of_week = $7,
+	autostop_requirement_weeks = $8,
+	autostart_block_days_of_week = $9,
+	failure_ttl = $10,
+	time_til_dormant = $11,
+	time_til_dormant_autodelete = $12
 WHERE
 	id = $1
-RETURNING
-	*;
+;
 
--- name: UpdateTemplateACLByID :one
+-- name: UpdateTemplateACLByID :exec
 UPDATE
 	templates
 SET
@@ -134,8 +156,7 @@ SET
 	user_acl = $2
 WHERE
 	id = $3
-RETURNING
-	*;
+;
 
 -- name: GetTemplateAverageBuildTime :one
 WITH build_times AS (
@@ -167,4 +188,14 @@ SELECT
 	coalesce((PERCENTILE_DISC(0.95) WITHIN GROUP(ORDER BY exec_time_sec) FILTER (WHERE transition = 'stop')), -1)::FLOAT AS stop_95,
 	coalesce((PERCENTILE_DISC(0.95) WITHIN GROUP(ORDER BY exec_time_sec) FILTER (WHERE transition = 'delete')), -1)::FLOAT AS delete_95
 FROM build_times
+;
+
+-- name: UpdateTemplateAccessControlByID :exec
+UPDATE
+	templates
+SET
+	require_active_version = $2,
+	deprecated = $3
+WHERE
+	id = $1
 ;

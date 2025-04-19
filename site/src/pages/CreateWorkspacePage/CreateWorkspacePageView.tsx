@@ -1,414 +1,477 @@
-import TextField from "@mui/material/TextField"
-import * as TypesGen from "api/typesGenerated"
-import { ParameterInput } from "components/ParameterInput/ParameterInput"
-import { RichParameterInput } from "components/RichParameterInput/RichParameterInput"
-import { Stack } from "components/Stack/Stack"
-import { UserAutocomplete } from "components/UserAutocomplete/UserAutocomplete"
-import { FormikContextType, FormikTouched, useFormik } from "formik"
-import { FC, useEffect, useState } from "react"
-import { useTranslation } from "react-i18next"
-import { getFormHelpers, nameValidator, onChangeTrimmed } from "utils/formUtils"
-import * as Yup from "yup"
-import { AlertBanner } from "components/AlertBanner/AlertBanner"
-import { FullPageHorizontalForm } from "components/FullPageForm/FullPageHorizontalForm"
-import { SelectedTemplate } from "./SelectedTemplate"
-import { Loader } from "components/Loader/Loader"
-import { GitAuth } from "components/GitAuth/GitAuth"
+import type { Interpolation, Theme } from "@emotion/react";
+import FormControlLabel from "@mui/material/FormControlLabel";
+import FormHelperText from "@mui/material/FormHelperText";
+import TextField from "@mui/material/TextField";
+import type * as TypesGen from "api/typesGenerated";
+import { Alert } from "components/Alert/Alert";
+import { ErrorAlert } from "components/Alert/ErrorAlert";
+import { Avatar } from "components/Avatar/Avatar";
+import { Button } from "components/Button/Button";
+import { FeatureStageBadge } from "components/FeatureStageBadge/FeatureStageBadge";
+import { SelectFilter } from "components/Filter/SelectFilter";
 import {
-  FormFields,
-  FormSection,
-  FormFooter,
-  HorizontalForm,
-} from "components/Form/Form"
-import { makeStyles } from "@mui/styles"
+	FormFields,
+	FormFooter,
+	FormSection,
+	HorizontalForm,
+} from "components/Form/Form";
+import { Margins } from "components/Margins/Margins";
 import {
-  selectInitialRichParametersValues,
-  useValidationSchemaForRichParameters,
-  workspaceBuildParameterValue,
-} from "utils/richParameters"
-
-export enum CreateWorkspaceErrors {
-  GET_TEMPLATES_ERROR = "getTemplatesError",
-  GET_TEMPLATE_SCHEMA_ERROR = "getTemplateSchemaError",
-  GET_TEMPLATE_GITAUTH_ERROR = "getTemplateGitAuthError",
-  CREATE_WORKSPACE_ERROR = "createWorkspaceError",
-}
+	PageHeader,
+	PageHeaderSubtitle,
+	PageHeaderTitle,
+} from "components/PageHeader/PageHeader";
+import { Pill } from "components/Pill/Pill";
+import { RichParameterInput } from "components/RichParameterInput/RichParameterInput";
+import { Spinner } from "components/Spinner/Spinner";
+import { Stack } from "components/Stack/Stack";
+import { Switch } from "components/Switch/Switch";
+import { UserAutocomplete } from "components/UserAutocomplete/UserAutocomplete";
+import { type FormikContextType, useFormik } from "formik";
+import { generateWorkspaceName } from "modules/workspaces/generateWorkspaceName";
+import { type FC, useCallback, useEffect, useMemo, useState } from "react";
+import {
+	getFormHelpers,
+	nameValidator,
+	onChangeTrimmed,
+} from "utils/formUtils";
+import {
+	type AutofillBuildParameter,
+	getInitialRichParameterValues,
+	useValidationSchemaForRichParameters,
+} from "utils/richParameters";
+import * as Yup from "yup";
+import type {
+	CreateWorkspaceMode,
+	ExternalAuthPollingState,
+} from "./CreateWorkspacePage";
+import { ExternalAuthButton } from "./ExternalAuthButton";
+import type { CreateWorkspacePermissions } from "./permissions";
+export const Language = {
+	duplicationWarning:
+		"Duplicating a workspace only copies its parameters. No state from the old workspace is copied over.",
+} as const;
 
 export interface CreateWorkspacePageViewProps {
-  loadingTemplates: boolean
-  loadingTemplateSchema: boolean
-  creatingWorkspace: boolean
-  hasTemplateErrors: boolean
-  templateName: string
-  templates?: TypesGen.Template[]
-  selectedTemplate?: TypesGen.Template
-  templateParameters?: TypesGen.TemplateVersionParameter[]
-  templateSchema?: TypesGen.ParameterSchema[]
-  templateGitAuth?: TypesGen.TemplateVersionGitAuth[]
-  createWorkspaceErrors: Partial<Record<CreateWorkspaceErrors, Error | unknown>>
-  canCreateForUser?: boolean
-  owner: TypesGen.User | null
-  setOwner: (arg0: TypesGen.User | null) => void
-  onCancel: () => void
-  onSubmit: (req: TypesGen.CreateWorkspaceRequest) => void
-  // initialTouched is only used for testing the error state of the form.
-  initialTouched?: FormikTouched<TypesGen.CreateWorkspaceRequest>
-  defaultParameterValues?: Record<string, string>
+	mode: CreateWorkspaceMode;
+	defaultName?: string | null;
+	disabledParams?: string[];
+	error: unknown;
+	resetMutation: () => void;
+	defaultOwner: TypesGen.User;
+	template: TypesGen.Template;
+	versionId?: string;
+	externalAuth: TypesGen.TemplateVersionExternalAuth[];
+	externalAuthPollingState: ExternalAuthPollingState;
+	startPollingExternalAuth: () => void;
+	hasAllRequiredExternalAuth: boolean;
+	parameters: TypesGen.TemplateVersionParameter[];
+	autofillParameters: AutofillBuildParameter[];
+	presets: TypesGen.Preset[];
+	permissions: CreateWorkspacePermissions;
+	creatingWorkspace: boolean;
+	onCancel: () => void;
+	onSubmit: (
+		req: TypesGen.CreateWorkspaceRequest,
+		owner: TypesGen.User,
+	) => void;
 }
 
-export const CreateWorkspacePageView: FC<
-  React.PropsWithChildren<CreateWorkspacePageViewProps>
-> = (props) => {
-  const [parameterValues, setParameterValues] = useState<
-    Record<string, string>
-  >(props.defaultParameterValues ?? {})
-  const initialRichParameterValues = selectInitialRichParametersValues(
-    props.templateParameters,
-    props.defaultParameterValues,
-  )
-  const [gitAuthErrors, setGitAuthErrors] = useState<Record<string, string>>({})
-  useEffect(() => {
-    // templateGitAuth is refreshed automatically using a BroadcastChannel
-    // which may change the `authenticated` property.
-    //
-    // If the provider becomes authenticated, we want the error message
-    // to disappear.
-    setGitAuthErrors({})
-  }, [props.templateGitAuth])
+export const CreateWorkspacePageView: FC<CreateWorkspacePageViewProps> = ({
+	mode,
+	defaultName,
+	disabledParams,
+	error,
+	resetMutation,
+	defaultOwner,
+	template,
+	versionId,
+	externalAuth,
+	externalAuthPollingState,
+	startPollingExternalAuth,
+	hasAllRequiredExternalAuth,
+	parameters,
+	autofillParameters,
+	presets = [],
+	permissions,
+	creatingWorkspace,
+	onSubmit,
+	onCancel,
+}) => {
+	const [owner, setOwner] = useState(defaultOwner);
+	const [suggestedName, setSuggestedName] = useState(() =>
+		generateWorkspaceName(),
+	);
+	const [showPresetParameters, setShowPresetParameters] = useState(false);
 
-  const workspaceErrors =
-    props.createWorkspaceErrors[CreateWorkspaceErrors.CREATE_WORKSPACE_ERROR]
+	const rerollSuggestedName = useCallback(() => {
+		setSuggestedName(() => generateWorkspaceName());
+	}, []);
 
-  // Scroll to top of page if errors are present
-  useEffect(() => {
-    if (props.hasTemplateErrors || Boolean(workspaceErrors)) {
-      window.scrollTo(0, 0)
-    }
-  }, [props.hasTemplateErrors, workspaceErrors])
+	const form: FormikContextType<TypesGen.CreateWorkspaceRequest> =
+		useFormik<TypesGen.CreateWorkspaceRequest>({
+			initialValues: {
+				name: defaultName ?? "",
+				template_id: template.id,
+				rich_parameter_values: getInitialRichParameterValues(
+					parameters,
+					autofillParameters,
+				),
+			},
+			validationSchema: Yup.object({
+				name: nameValidator("Workspace Name"),
+				rich_parameter_values: useValidationSchemaForRichParameters(parameters),
+			}),
+			enableReinitialize: true,
+			onSubmit: (request) => {
+				if (!hasAllRequiredExternalAuth) {
+					return;
+				}
 
-  const { t } = useTranslation("createWorkspacePage")
-  const styles = useStyles()
+				onSubmit(request, owner);
+			},
+		});
 
-  const form: FormikContextType<TypesGen.CreateWorkspaceRequest> =
-    useFormik<TypesGen.CreateWorkspaceRequest>({
-      initialValues: {
-        name: "",
-        template_id: props.selectedTemplate ? props.selectedTemplate.id : "",
-        rich_parameter_values: initialRichParameterValues,
-      },
-      validationSchema: Yup.object({
-        name: nameValidator(t("nameLabel", { ns: "createWorkspacePage" })),
-        rich_parameter_values: useValidationSchemaForRichParameters(
-          "createWorkspacePage",
-          props.templateParameters,
-        ),
-      }),
-      enableReinitialize: true,
-      initialTouched: props.initialTouched,
-      onSubmit: (request) => {
-        for (let i = 0; i < (props.templateGitAuth?.length || 0); i++) {
-          const auth = props.templateGitAuth?.[i]
-          if (!auth) {
-            continue
-          }
-          if (!auth.authenticated) {
-            setGitAuthErrors({
-              [auth.id]: "You must authenticate to create a workspace!",
-            })
-            form.setSubmitting(false)
-            return
-          }
-        }
+	useEffect(() => {
+		if (error) {
+			window.scrollTo(0, 0);
+		}
+	}, [error]);
 
-        if (!props.templateSchema) {
-          throw new Error("No template schema loaded")
-        }
+	const getFieldHelpers = getFormHelpers<TypesGen.CreateWorkspaceRequest>(
+		form,
+		error,
+	);
 
-        const createRequests: TypesGen.CreateParameterRequest[] = []
-        props.templateSchema.forEach((schema) => {
-          let value = schema.default_source_value
-          if (schema.name in parameterValues) {
-            value = parameterValues[schema.name]
-          }
-          createRequests.push({
-            name: schema.name,
-            destination_scheme: schema.default_destination_scheme,
-            source_scheme: "data",
-            source_value: value,
-          })
-        })
-        props.onSubmit({
-          ...request,
-          parameter_values: createRequests,
-        })
-        form.setSubmitting(false)
-      },
-    })
+	const autofillByName = useMemo(
+		() =>
+			Object.fromEntries(
+				autofillParameters.map((param) => [param.name, param]),
+			),
+		[autofillParameters],
+	);
 
-  const isLoading = props.loadingTemplateSchema || props.loadingTemplates
-  // We only want to show schema that have redisplay_value equals true
-  const schemaToBeDisplayed = props.templateSchema?.filter(
-    (schema) => schema.redisplay_value,
-  )
+	const [presetOptions, setPresetOptions] = useState([
+		{ label: "None", value: "" },
+	]);
+	useEffect(() => {
+		setPresetOptions([
+			{ label: "None", value: "" },
+			...presets.map((preset) => ({
+				label: preset.Name,
+				value: preset.ID,
+			})),
+		]);
+	}, [presets]);
 
-  const getFieldHelpers = getFormHelpers<TypesGen.CreateWorkspaceRequest>(
-    form,
-    props.createWorkspaceErrors[CreateWorkspaceErrors.CREATE_WORKSPACE_ERROR],
-  )
+	const [selectedPresetIndex, setSelectedPresetIndex] = useState(0);
+	const [presetParameterNames, setPresetParameterNames] = useState<string[]>(
+		[],
+	);
 
-  if (isLoading) {
-    return <Loader />
-  }
+	useEffect(() => {
+		const selectedPresetOption = presetOptions[selectedPresetIndex];
+		let selectedPreset: TypesGen.Preset | undefined;
+		for (const preset of presets) {
+			if (preset.ID === selectedPresetOption.value) {
+				selectedPreset = preset;
+				break;
+			}
+		}
 
-  return (
-    <FullPageHorizontalForm title="New workspace" onCancel={props.onCancel}>
-      <HorizontalForm onSubmit={form.handleSubmit}>
-        {Boolean(props.hasTemplateErrors) && (
-          <Stack>
-            {Boolean(
-              props.createWorkspaceErrors[
-                CreateWorkspaceErrors.GET_TEMPLATES_ERROR
-              ],
-            ) && (
-              <AlertBanner
-                severity="error"
-                error={
-                  props.createWorkspaceErrors[
-                    CreateWorkspaceErrors.GET_TEMPLATES_ERROR
-                  ]
-                }
-              />
-            )}
-            {Boolean(
-              props.createWorkspaceErrors[
-                CreateWorkspaceErrors.GET_TEMPLATE_SCHEMA_ERROR
-              ],
-            ) && (
-              <AlertBanner
-                severity="error"
-                error={
-                  props.createWorkspaceErrors[
-                    CreateWorkspaceErrors.GET_TEMPLATE_SCHEMA_ERROR
-                  ]
-                }
-              />
-            )}
-            {Boolean(
-              props.createWorkspaceErrors[
-                CreateWorkspaceErrors.GET_TEMPLATE_GITAUTH_ERROR
-              ],
-            ) && (
-              <AlertBanner
-                severity="error"
-                error={
-                  props.createWorkspaceErrors[
-                    CreateWorkspaceErrors.GET_TEMPLATE_GITAUTH_ERROR
-                  ]
-                }
-              />
-            )}
-          </Stack>
-        )}
+		if (!selectedPreset || !selectedPreset.Parameters) {
+			setPresetParameterNames([]);
+			return;
+		}
 
-        {Boolean(
-          props.createWorkspaceErrors[
-            CreateWorkspaceErrors.CREATE_WORKSPACE_ERROR
-          ],
-        ) && (
-          <AlertBanner
-            severity="error"
-            error={
-              props.createWorkspaceErrors[
-                CreateWorkspaceErrors.CREATE_WORKSPACE_ERROR
-              ]
-            }
-          />
-        )}
+		setPresetParameterNames(selectedPreset.Parameters.map((p) => p.Name));
 
-        {/* General info */}
-        <FormSection
-          title="General info"
-          description="The template and name of your new workspace."
-        >
-          <FormFields>
-            {props.selectedTemplate && (
-              <SelectedTemplate template={props.selectedTemplate} />
-            )}
+		for (const presetParameter of selectedPreset.Parameters) {
+			const parameterIndex = parameters.findIndex(
+				(p) => p.name === presetParameter.Name,
+			);
+			if (parameterIndex === -1) continue;
 
-            <TextField
-              {...getFieldHelpers("name")}
-              disabled={form.isSubmitting}
-              onChange={onChangeTrimmed(form)}
-              autoFocus
-              fullWidth
-              label={t("nameLabel")}
-            />
-          </FormFields>
-        </FormSection>
+			const parameterField = `rich_parameter_values.${parameterIndex}`;
 
-        {/* Workspace owner */}
-        {props.canCreateForUser && (
-          <FormSection
-            title="Workspace owner"
-            description="The user that is going to own this workspace. If you are admin, you can create workspace for others."
-          >
-            <FormFields>
-              <UserAutocomplete
-                value={props.owner}
-                onChange={props.setOwner}
-                label={t("ownerLabel")}
-                size="medium"
-              />
-            </FormFields>
-          </FormSection>
-        )}
+			form.setFieldValue(parameterField, {
+				name: presetParameter.Name,
+				value: presetParameter.Value,
+			});
+		}
+	}, [
+		presetOptions,
+		selectedPresetIndex,
+		presets,
+		parameters,
+		form.setFieldValue,
+	]);
 
-        {/* Template git auth */}
-        {props.templateGitAuth && props.templateGitAuth.length > 0 && (
-          <FormSection
-            title="Git Authentication"
-            description="This template requires authentication to automatically perform Git operations on create."
-          >
-            <FormFields>
-              {props.templateGitAuth.map((auth, index) => (
-                <GitAuth
-                  key={index}
-                  authenticateURL={auth.authenticate_url}
-                  authenticated={auth.authenticated}
-                  type={auth.type}
-                  error={gitAuthErrors[auth.id]}
-                />
-              ))}
-            </FormFields>
-          </FormSection>
-        )}
+	return (
+		<Margins size="medium">
+			<PageHeader
+				actions={
+					<Button size="sm" variant="outline" onClick={onCancel}>
+						Cancel
+					</Button>
+				}
+			>
+				<Stack direction="row">
+					<Avatar
+						variant="icon"
+						size="lg"
+						src={template.icon}
+						fallback={template.name}
+					/>
 
-        {/* Template params */}
-        {schemaToBeDisplayed && schemaToBeDisplayed.length > 0 && (
-          <FormSection
-            title="Template params"
-            description="These values are provided by your template's Terraform configuration."
-          >
-            <FormFields>
-              {schemaToBeDisplayed.map((schema) => (
-                <ParameterInput
-                  disabled={form.isSubmitting}
-                  key={schema.id}
-                  defaultValue={parameterValues[schema.name]}
-                  onChange={(value) => {
-                    setParameterValues({
-                      ...parameterValues,
-                      [schema.name]: value,
-                    })
-                  }}
-                  schema={schema}
-                />
-              ))}
-            </FormFields>
-          </FormSection>
-        )}
+					<div>
+						<PageHeaderTitle>
+							{template.display_name.length > 0
+								? template.display_name
+								: template.name}
+						</PageHeaderTitle>
 
-        {/* Mutable rich parameters */}
-        {props.templateParameters &&
-          props.templateParameters.filter((p) => p.mutable).length > 0 && (
-            <FormSection
-              title="Parameters"
-              description="These parameters are provided by your template's Terraform configuration and can be changed after creating the workspace."
-            >
-              <FormFields>
-                {props.templateParameters.map(
-                  (parameter, index) =>
-                    parameter.mutable && (
-                      <RichParameterInput
-                        {...getFieldHelpers(
-                          "rich_parameter_values[" + index + "].value",
-                        )}
-                        disabled={form.isSubmitting}
-                        index={index}
-                        key={parameter.name}
-                        onChange={(value) => {
-                          form.setFieldValue("rich_parameter_values." + index, {
-                            name: parameter.name,
-                            value: value,
-                          })
-                        }}
-                        parameter={parameter}
-                        initialValue={workspaceBuildParameterValue(
-                          initialRichParameterValues,
-                          parameter,
-                        )}
-                      />
-                    ),
-                )}
-              </FormFields>
-            </FormSection>
-          )}
+						<PageHeaderSubtitle condensed>New workspace</PageHeaderSubtitle>
+					</div>
 
-        {/* Immutable rich parameters */}
-        {props.templateParameters &&
-          props.templateParameters.filter((p) => !p.mutable).length > 0 && (
-            <FormSection
-              title="Immutable parameters"
-              classes={{ root: styles.warningSection }}
-              description={
-                <>
-                  These parameters are also provided by your Terraform
-                  configuration but they{" "}
-                  <strong className={styles.warningText}>
-                    cannot be changed after creating the workspace.
-                  </strong>
-                </>
-              }
-            >
-              <FormFields>
-                {props.templateParameters.map(
-                  (parameter, index) =>
-                    !parameter.mutable && (
-                      <RichParameterInput
-                        {...getFieldHelpers(
-                          "rich_parameter_values[" + index + "].value",
-                        )}
-                        disabled={form.isSubmitting}
-                        index={index}
-                        key={parameter.name}
-                        onChange={(value) => {
-                          form.setFieldValue("rich_parameter_values." + index, {
-                            name: parameter.name,
-                            value: value,
-                          })
-                        }}
-                        parameter={parameter}
-                        initialValue={workspaceBuildParameterValue(
-                          initialRichParameterValues,
-                          parameter,
-                        )}
-                      />
-                    ),
-                )}
-              </FormFields>
-            </FormSection>
-          )}
+					{template.deprecated && <Pill type="warning">Deprecated</Pill>}
+				</Stack>
+			</PageHeader>
 
-        <FormFooter
-          onCancel={props.onCancel}
-          isLoading={props.creatingWorkspace}
-          submitLabel={t("createWorkspace")}
-        />
-      </HorizontalForm>
-    </FullPageHorizontalForm>
-  )
-}
+			<HorizontalForm
+				name="create-workspace-form"
+				onSubmit={form.handleSubmit}
+				css={{ padding: "16px 0" }}
+			>
+				{Boolean(error) && <ErrorAlert error={error} />}
 
-const useStyles = makeStyles((theme) => ({
-  warningText: {
-    color: theme.palette.warning.light,
-  },
-  warningSection: {
-    border: `1px solid ${theme.palette.warning.light}`,
-    borderRadius: 8,
-    backgroundColor: theme.palette.background.paper,
-    padding: theme.spacing(10),
-    marginLeft: -theme.spacing(10),
-    marginRight: -theme.spacing(10),
-  },
-}))
+				{mode === "duplicate" && (
+					<Alert severity="info" dismissible data-testid="duplication-warning">
+						{Language.duplicationWarning}
+					</Alert>
+				)}
+
+				{/* General info */}
+				<FormSection
+					title="General"
+					description={
+						permissions.createWorkspaceForAny
+							? "The name of the workspace and its owner. Only admins can create workspaces for other users."
+							: "The name of your new workspace."
+					}
+				>
+					<FormFields>
+						{versionId && versionId !== template.active_version_id && (
+							<Stack spacing={1} css={styles.hasDescription}>
+								<TextField
+									disabled
+									fullWidth
+									value={versionId}
+									label="Version ID"
+								/>
+								<span css={styles.description}>
+									This parameter has been preset, and cannot be modified.
+								</span>
+							</Stack>
+						)}
+
+						<div>
+							<TextField
+								{...getFieldHelpers("name")}
+								disabled={creatingWorkspace}
+								// resetMutation facilitates the clearing of validation errors
+								onChange={onChangeTrimmed(form, resetMutation)}
+								fullWidth
+								label="Workspace Name"
+							/>
+							<FormHelperText data-chromatic="ignore">
+								Need a suggestion?{" "}
+								<Button
+									variant="subtle"
+									size="sm"
+									css={styles.nameSuggestion}
+									onClick={async () => {
+										await form.setFieldValue("name", suggestedName);
+										rerollSuggestedName();
+									}}
+								>
+									{suggestedName}
+								</Button>
+							</FormHelperText>
+						</div>
+
+						{permissions.createWorkspaceForAny && (
+							<UserAutocomplete
+								value={owner}
+								onChange={(user) => {
+									setOwner(user ?? defaultOwner);
+								}}
+								label="Owner"
+								size="medium"
+							/>
+						)}
+					</FormFields>
+				</FormSection>
+
+				{externalAuth && externalAuth.length > 0 && (
+					<FormSection
+						title="External Authentication"
+						description="This template uses external services for authentication."
+					>
+						<FormFields>
+							{Boolean(error) && !hasAllRequiredExternalAuth && (
+								<Alert severity="error">
+									To create a workspace using this template, please connect to
+									all required external authentication providers listed below.
+								</Alert>
+							)}
+							{externalAuth.map((auth) => (
+								<ExternalAuthButton
+									key={auth.id}
+									error={error}
+									auth={auth}
+									isLoading={externalAuthPollingState === "polling"}
+									onStartPolling={startPollingExternalAuth}
+									displayRetry={externalAuthPollingState === "abandoned"}
+								/>
+							))}
+						</FormFields>
+					</FormSection>
+				)}
+
+				{parameters.length > 0 && (
+					<FormSection
+						title="Parameters"
+						description="These are the settings used by your template. Please note that immutable parameters cannot be modified once the workspace is created."
+					>
+						{/* The parameter fields are densely packed and carry significant information,
+                hence they require additional vertical spacing for better readability and
+                user experience. */}
+						<FormFields css={{ gap: 36 }}>
+							{presets.length > 0 && (
+								<Stack direction="column" spacing={2}>
+									<Stack direction="row" spacing={2} alignItems="center">
+										<span css={styles.description}>
+											Select a preset to get started
+										</span>
+										<FeatureStageBadge contentType={"beta"} size="md" />
+									</Stack>
+									<Stack direction="column" spacing={2}>
+										<Stack direction="row" spacing={2}>
+											<SelectFilter
+												label="Preset"
+												options={presetOptions}
+												onSelect={(option) => {
+													const index = presetOptions.findIndex(
+														(preset) => preset.value === option?.value,
+													);
+													if (index === -1) {
+														return;
+													}
+													setSelectedPresetIndex(index);
+													form.setFieldValue(
+														"template_version_preset_id",
+														option?.value,
+													);
+												}}
+												placeholder="Select a preset"
+												selectedOption={presetOptions[selectedPresetIndex]}
+											/>
+										</Stack>
+										<div
+											css={{
+												display: "flex",
+												alignItems: "center",
+												gap: "8px",
+											}}
+										>
+											<Switch
+												id="show-preset-parameters"
+												checked={showPresetParameters}
+												onCheckedChange={setShowPresetParameters}
+											/>
+											<label
+												htmlFor="show-preset-parameters"
+												css={styles.description}
+											>
+												Show preset parameters
+											</label>
+										</div>
+									</Stack>
+								</Stack>
+							)}
+
+							{parameters.map((parameter, index) => {
+								const parameterField = `rich_parameter_values.${index}`;
+								const parameterInputName = `${parameterField}.value`;
+								const isPresetParameter = presetParameterNames.includes(
+									parameter.name,
+								);
+								const isDisabled =
+									disabledParams?.includes(
+										parameter.name.toLowerCase().replace(/ /g, "_"),
+									) ||
+									creatingWorkspace ||
+									isPresetParameter;
+
+								// Hide preset parameters if showPresetParameters is false
+								if (!showPresetParameters && isPresetParameter) {
+									return null;
+								}
+
+								return (
+									<div key={parameter.name}>
+										<RichParameterInput
+											{...getFieldHelpers(parameterInputName)}
+											onChange={async (value) => {
+												await form.setFieldValue(parameterField, {
+													name: parameter.name,
+													value,
+												});
+											}}
+											parameter={parameter}
+											parameterAutofill={autofillByName[parameter.name]}
+											disabled={isDisabled}
+											isPreset={isPresetParameter}
+										/>
+									</div>
+								);
+							})}
+						</FormFields>
+					</FormSection>
+				)}
+
+				<FormFooter>
+					<Button onClick={onCancel} variant="outline">
+						Cancel
+					</Button>
+					<Button
+						type="submit"
+						disabled={creatingWorkspace || !hasAllRequiredExternalAuth}
+					>
+						<Spinner loading={creatingWorkspace} />
+						Create workspace
+					</Button>
+				</FormFooter>
+			</HorizontalForm>
+		</Margins>
+	);
+};
+
+const styles = {
+	nameSuggestion: (theme) => ({
+		color: theme.roles.notice.fill.solid,
+		padding: "4px 8px",
+		lineHeight: "inherit",
+		fontSize: "inherit",
+		height: "unset",
+		minWidth: "unset",
+	}),
+	hasDescription: {
+		paddingBottom: 16,
+	},
+	description: (theme) => ({
+		fontSize: 13,
+		color: theme.palette.text.secondary,
+	}),
+} satisfies Record<string, Interpolation<Theme>>;

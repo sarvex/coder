@@ -12,10 +12,10 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/database/dbauthz"
-	"github.com/coder/coder/coderd/httpapi"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbauthz"
+	"github.com/coder/coder/v2/coderd/httpapi"
+	"github.com/coder/coder/v2/codersdk"
 )
 
 const (
@@ -141,18 +141,6 @@ func ExtractWorkspaceProxy(opts ExtractWorkspaceProxyConfig) func(http.Handler) 
 			// they can still only access the routes that the middleware is
 			// mounted to.
 			ctx = dbauthz.AsSystemRestricted(ctx)
-			subj, ok := dbauthz.ActorFromContext(ctx)
-			if !ok {
-				// This should never happen
-				httpapi.InternalServerError(w, xerrors.New("developer error: ExtractWorkspaceProxy missing rbac actor"))
-				return
-			}
-			// Use the same subject for the userAuthKey
-			ctx = context.WithValue(ctx, userAuthKey{}, Authorization{
-				Actor:     subj,
-				ActorName: "proxy_" + proxy.Name,
-			})
-
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -160,7 +148,7 @@ func ExtractWorkspaceProxy(opts ExtractWorkspaceProxyConfig) func(http.Handler) 
 
 type workspaceProxyParamContextKey struct{}
 
-// WorkspaceProxyParam returns the worksace proxy from the ExtractWorkspaceProxyParam handler.
+// WorkspaceProxyParam returns the workspace proxy from the ExtractWorkspaceProxyParam handler.
 func WorkspaceProxyParam(r *http.Request) database.WorkspaceProxy {
 	user, ok := r.Context().Value(workspaceProxyParamContextKey{}).(database.WorkspaceProxy)
 	if !ok {
@@ -173,7 +161,7 @@ func WorkspaceProxyParam(r *http.Request) database.WorkspaceProxy {
 // parameter.
 //
 //nolint:revive
-func ExtractWorkspaceProxyParam(db database.Store) func(http.Handler) http.Handler {
+func ExtractWorkspaceProxyParam(db database.Store, deploymentID string, fetchPrimaryProxy func(ctx context.Context) (database.WorkspaceProxy, error)) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
@@ -188,9 +176,14 @@ func ExtractWorkspaceProxyParam(db database.Store) func(http.Handler) http.Handl
 
 			var proxy database.WorkspaceProxy
 			var dbErr error
-			if proxyID, err := uuid.Parse(proxyQuery); err == nil {
+			if proxyQuery == "primary" || proxyQuery == deploymentID {
+				// Requesting primary proxy
+				proxy, dbErr = fetchPrimaryProxy(ctx)
+			} else if proxyID, err := uuid.Parse(proxyQuery); err == nil {
+				// Request proxy by id
 				proxy, dbErr = db.GetWorkspaceProxyByID(ctx, proxyID)
 			} else {
+				// Request proxy by name
 				proxy, dbErr = db.GetWorkspaceProxyByName(ctx, proxyQuery)
 			}
 			if httpapi.Is404Error(dbErr) {

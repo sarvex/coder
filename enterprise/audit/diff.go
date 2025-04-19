@@ -4,13 +4,14 @@ import (
 	"database/sql"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/coderd/audit"
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/util/ptr"
+	"github.com/coder/coder/v2/coderd/audit"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/util/ptr"
 )
 
 func structName(t reflect.Type) string {
@@ -49,6 +50,7 @@ func diffValues(left, right any, table Table) audit.Map {
 		)
 
 		diffName := field.FieldType.Tag.Get("json")
+		diffName = strings.TrimSuffix(diffName, ",omitempty")
 
 		atype, ok := diffKey[diffName]
 		if !ok {
@@ -142,8 +144,27 @@ func convertDiffType(left, right any) (newLeft, newRight any, changed bool) {
 		}
 
 		return leftInt64Ptr, rightInt64Ptr, true
+	case database.NullNotificationMethod:
+		vl, vr := string(typedLeft.NotificationMethod), ""
+		if val, ok := right.(database.NullNotificationMethod); ok {
+			vr = string(val.NotificationMethod)
+		}
+
+		return vl, vr, true
 	case database.TemplateACL:
 		return fmt.Sprintf("%+v", left), fmt.Sprintf("%+v", right), true
+	case database.CustomRolePermissions:
+		// String representation is much easier to visually inspect
+		leftArr := make([]string, 0)
+		rightArr := make([]string, 0)
+		for _, p := range typedLeft {
+			leftArr = append(leftArr, p.String())
+		}
+		for _, p := range right.(database.CustomRolePermissions) {
+			rightArr = append(rightArr, p.String())
+		}
+
+		return leftArr, rightArr, true
 	default:
 		return left, right, false
 	}

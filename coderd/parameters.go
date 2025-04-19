@@ -3,238 +3,248 @@ package coderd
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"fmt"
+	"encoding/json"
 	"net/http"
+	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/httpapi"
-	"github.com/coder/coder/coderd/parameter"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbauthz"
+	"github.com/coder/coder/v2/coderd/httpapi"
+	"github.com/coder/coder/v2/coderd/httpmw"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/codersdk/wsjson"
+	"github.com/coder/preview"
+	previewtypes "github.com/coder/preview/types"
+	"github.com/coder/websocket"
 )
 
-// @Summary Create parameter
-// @ID create-parameter
+// @Summary Open dynamic parameters WebSocket by template version
+// @ID open-dynamic-parameters-websocket-by-template-version
 // @Security CoderSessionToken
-// @Accept json
-// @Produce json
-// @Tags Parameters
-// @Param request body codersdk.CreateParameterRequest true "Parameter request"
-// @Param scope path string true "Scope" Enums(template,workspace,import_job)
-// @Param id path string true "ID" format(uuid)
-// @Success 201 {object} codersdk.Parameter
-// @Router /parameters/{scope}/{id} [post]
-func (api *API) postParameter(rw http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	scope, scopeID, valid := readScopeAndID(ctx, rw, r)
-	if !valid {
-		return
-	}
+// @Tags Templates
+// @Param user path string true "Template version ID" format(uuid)
+// @Param templateversion path string true "Template version ID" format(uuid)
+// @Success 101
+// @Router /users/{user}/templateversions/{templateversion}/parameters [get]
+func (api *API) templateVersionDynamicParameters(rw http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	user := httpmw.UserParam(r)
+	templateVersion := httpmw.TemplateVersionParam(r)
 
-	var createRequest codersdk.CreateParameterRequest
-	if !httpapi.Read(ctx, rw, r, &createRequest) {
-		return
-	}
-	_, err := api.Database.GetParameterValueByScopeAndName(ctx, database.GetParameterValueByScopeAndNameParams{
-		Scope:   scope,
-		ScopeID: scopeID,
-		Name:    createRequest.Name,
-	})
-	if err == nil {
-		httpapi.Write(ctx, rw, http.StatusConflict, codersdk.Response{
-			Message: fmt.Sprintf("Parameter already exists in scope %q and name %q.", scope, createRequest.Name),
-		})
-		return
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
-			Message: "Internal error fetching parameter.",
-			Detail:  err.Error(),
-		})
-		return
-	}
-
-	parameterValue, err := api.Database.InsertParameterValue(ctx, database.InsertParameterValueParams{
-		ID:                uuid.New(),
-		Name:              createRequest.Name,
-		CreatedAt:         database.Now(),
-		UpdatedAt:         database.Now(),
-		Scope:             scope,
-		ScopeID:           scopeID,
-		SourceScheme:      database.ParameterSourceScheme(createRequest.SourceScheme),
-		SourceValue:       createRequest.SourceValue,
-		DestinationScheme: database.ParameterDestinationScheme(createRequest.DestinationScheme),
-	})
-	if err != nil {
-		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
-			Message: "Internal error inserting parameter.",
-			Detail:  err.Error(),
-		})
-		return
-	}
-
-	httpapi.Write(ctx, rw, http.StatusCreated, convertParameterValue(parameterValue))
-}
-
-// @Summary Get parameters
-// @ID get-parameters
-// @Security CoderSessionToken
-// @Produce json
-// @Tags Parameters
-// @Param scope path string true "Scope" Enums(template,workspace,import_job)
-// @Param id path string true "ID" format(uuid)
-// @Success 200 {array} codersdk.Parameter
-// @Router /parameters/{scope}/{id} [get]
-func (api *API) parameters(rw http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	scope, scopeID, valid := readScopeAndID(ctx, rw, r)
-	if !valid {
-		return
-	}
-
-	parameterValues, err := api.Database.ParameterValues(ctx, database.ParameterValuesParams{
-		Scopes:   []database.ParameterScope{scope},
-		ScopeIds: []uuid.UUID{scopeID},
-	})
-	if errors.Is(err, sql.ErrNoRows) {
-		err = nil
-	}
-	if err != nil {
-		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
-			Message: "Internal error fetching parameter scope values.",
-			Detail:  err.Error(),
-		})
-		return
-	}
-	apiParameterValues := make([]codersdk.Parameter, 0, len(parameterValues))
-	for _, parameterValue := range parameterValues {
-		apiParameterValues = append(apiParameterValues, convertParameterValue(parameterValue))
-	}
-
-	httpapi.Write(ctx, rw, http.StatusOK, apiParameterValues)
-}
-
-// @Summary Delete parameter
-// @ID delete-parameter
-// @Security CoderSessionToken
-// @Produce json
-// @Tags Parameters
-// @Param scope path string true "Scope" Enums(template,workspace,import_job)
-// @Param id path string true "ID" format(uuid)
-// @Param name path string true "Name"
-// @Success 200 {object} codersdk.Response
-// @Router /parameters/{scope}/{id}/{name} [delete]
-func (api *API) deleteParameter(rw http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	scope, scopeID, valid := readScopeAndID(ctx, rw, r)
-	if !valid {
-		return
-	}
-
-	name := chi.URLParam(r, "name")
-	parameterValue, err := api.Database.GetParameterValueByScopeAndName(ctx, database.GetParameterValueByScopeAndNameParams{
-		Scope:   scope,
-		ScopeID: scopeID,
-		Name:    name,
-	})
+	// Check that the job has completed successfully
+	job, err := api.Database.GetProvisionerJobByID(ctx, templateVersion.JobID)
 	if httpapi.Is404Error(err) {
 		httpapi.ResourceNotFound(rw)
 		return
 	}
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
-			Message: "Internal error fetching parameter.",
+			Message: "Internal error fetching provisioner job.",
 			Detail:  err.Error(),
 		})
 		return
 	}
-	err = api.Database.DeleteParameterValueByID(ctx, parameterValue.ID)
+	if !job.CompletedAt.Valid {
+		httpapi.Write(ctx, rw, http.StatusTooEarly, codersdk.Response{
+			Message: "Template version job has not finished",
+		})
+		return
+	}
+
+	// nolint:gocritic // We need to fetch the templates files for the Terraform
+	// evaluator, and the user likely does not have permission.
+	fileCtx := dbauthz.AsProvisionerd(ctx)
+	fileID, err := api.Database.GetFileIDByTemplateVersionID(fileCtx, templateVersion.ID)
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
-			Message: "Internal error deleting parameter.",
+			Message: "Internal error finding template version Terraform.",
 			Detail:  err.Error(),
 		})
 		return
 	}
-	httpapi.Write(ctx, rw, http.StatusOK, codersdk.Response{
-		Message: "Parameter deleted.",
-	})
-}
 
-func convertParameterSchema(parameterSchema database.ParameterSchema) (codersdk.ParameterSchema, error) {
-	contains := []string{}
-	if parameterSchema.ValidationCondition != "" {
-		var err error
-		contains, _, err = parameter.Contains(parameterSchema.ValidationCondition)
-		if err != nil {
-			return codersdk.ParameterSchema{}, xerrors.Errorf("parse validation condition for %q: %w", parameterSchema.Name, err)
+	fs, err := api.FileCache.Acquire(fileCtx, fileID)
+	defer api.FileCache.Release(fileID)
+	if err != nil {
+		httpapi.Write(ctx, rw, http.StatusNotFound, codersdk.Response{
+			Message: "Internal error fetching template version Terraform.",
+			Detail:  err.Error(),
+		})
+		return
+	}
+
+	// Having the Terraform plan available for the evaluation engine is helpful
+	// for populating values from data blocks, but isn't strictly required. If
+	// we don't have a cached plan available, we just use an empty one instead.
+	plan := json.RawMessage("{}")
+	tf, err := api.Database.GetTemplateVersionTerraformValues(ctx, templateVersion.ID)
+	if err == nil {
+		plan = tf.CachedPlan
+	} else if !xerrors.Is(err, sql.ErrNoRows) {
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
+			Message: "Failed to retrieve Terraform values for template version",
+			Detail:  err.Error(),
+		})
+		return
+	}
+
+	owner, err := api.getWorkspaceOwnerData(ctx, user, templateVersion.OrganizationID)
+	if err != nil {
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
+			Message: "Internal error fetching workspace owner.",
+			Detail:  err.Error(),
+		})
+		return
+	}
+
+	input := preview.Input{
+		PlanJSON:        plan,
+		ParameterValues: map[string]string{},
+		Owner:           owner,
+	}
+
+	conn, err := websocket.Accept(rw, r, nil)
+	if err != nil {
+		httpapi.Write(ctx, rw, http.StatusUpgradeRequired, codersdk.Response{
+			Message: "Failed to accept WebSocket.",
+			Detail:  err.Error(),
+		})
+		return
+	}
+	stream := wsjson.NewStream[codersdk.DynamicParametersRequest, codersdk.DynamicParametersResponse](
+		conn,
+		websocket.MessageText,
+		websocket.MessageText,
+		api.Logger,
+	)
+
+	// Send an initial form state, computed without any user input.
+	result, diagnostics := preview.Preview(ctx, input, fs)
+	response := codersdk.DynamicParametersResponse{
+		ID:          -1,
+		Diagnostics: previewtypes.Diagnostics(diagnostics),
+	}
+	if result != nil {
+		response.Parameters = result.Parameters
+	}
+	err = stream.Send(response)
+	if err != nil {
+		stream.Drop()
+		return
+	}
+
+	// As the user types into the form, reprocess the state using their input,
+	// and respond with updates.
+	updates := stream.Chan()
+	for {
+		select {
+		case <-ctx.Done():
+			stream.Close(websocket.StatusGoingAway)
+			return
+		case update, ok := <-updates:
+			if !ok {
+				// The connection has been closed, so there is no one to write to
+				return
+			}
+			input.ParameterValues = update.Inputs
+			result, diagnostics := preview.Preview(ctx, input, fs)
+			response := codersdk.DynamicParametersResponse{
+				ID:          update.ID,
+				Diagnostics: previewtypes.Diagnostics(diagnostics),
+			}
+			if result != nil {
+				response.Parameters = result.Parameters
+			}
+			err = stream.Send(response)
+			if err != nil {
+				stream.Drop()
+				return
+			}
 		}
 	}
-
-	return codersdk.ParameterSchema{
-		ID:                       parameterSchema.ID,
-		CreatedAt:                parameterSchema.CreatedAt,
-		JobID:                    parameterSchema.JobID,
-		Name:                     parameterSchema.Name,
-		Description:              parameterSchema.Description,
-		DefaultSourceScheme:      codersdk.ParameterSourceScheme(parameterSchema.DefaultSourceScheme),
-		DefaultSourceValue:       parameterSchema.DefaultSourceValue,
-		AllowOverrideSource:      parameterSchema.AllowOverrideSource,
-		DefaultDestinationScheme: codersdk.ParameterDestinationScheme(parameterSchema.DefaultDestinationScheme),
-		AllowOverrideDestination: parameterSchema.AllowOverrideDestination,
-		DefaultRefresh:           parameterSchema.DefaultRefresh,
-		RedisplayValue:           parameterSchema.RedisplayValue,
-		ValidationError:          parameterSchema.ValidationError,
-		ValidationCondition:      parameterSchema.ValidationCondition,
-		ValidationTypeSystem:     string(parameterSchema.ValidationTypeSystem),
-		ValidationValueType:      parameterSchema.ValidationValueType,
-		ValidationContains:       contains,
-	}, nil
 }
 
-func convertParameterValue(parameterValue database.ParameterValue) codersdk.Parameter {
-	return codersdk.Parameter{
-		ID:                parameterValue.ID,
-		CreatedAt:         parameterValue.CreatedAt,
-		UpdatedAt:         parameterValue.UpdatedAt,
-		Scope:             codersdk.ParameterScope(parameterValue.Scope),
-		ScopeID:           parameterValue.ScopeID,
-		Name:              parameterValue.Name,
-		SourceScheme:      codersdk.ParameterSourceScheme(parameterValue.SourceScheme),
-		DestinationScheme: codersdk.ParameterDestinationScheme(parameterValue.DestinationScheme),
-	}
-}
+func (api *API) getWorkspaceOwnerData(
+	ctx context.Context,
+	user database.User,
+	organizationID uuid.UUID,
+) (previewtypes.WorkspaceOwner, error) {
+	var g errgroup.Group
 
-func readScopeAndID(ctx context.Context, rw http.ResponseWriter, r *http.Request) (database.ParameterScope, uuid.UUID, bool) {
-	scope := database.ParameterScope(chi.URLParam(r, "scope"))
-	switch scope {
-	case database.ParameterScopeTemplate, database.ParameterScopeImportJob, database.ParameterScopeWorkspace:
-	default:
-		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
-			Message: fmt.Sprintf("Invalid scope %q.", scope),
-			Validations: []codersdk.ValidationError{
-				{Field: "scope", Detail: "invalid scope"},
-			},
+	var ownerRoles []previewtypes.WorkspaceOwnerRBACRole
+	g.Go(func() error {
+		// nolint:gocritic // This is kind of the wrong query to use here, but it
+		// matches how the provisioner currently works. We should figure out
+		// something that needs less escalation but has the correct behavior.
+		row, err := api.Database.GetAuthorizationUserRoles(dbauthz.AsSystemRestricted(ctx), user.ID)
+		if err != nil {
+			return err
+		}
+		roles, err := row.RoleNames()
+		if err != nil {
+			return err
+		}
+		ownerRoles = make([]previewtypes.WorkspaceOwnerRBACRole, 0, len(roles))
+		for _, it := range roles {
+			if it.OrganizationID != uuid.Nil && it.OrganizationID != organizationID {
+				continue
+			}
+			var orgID string
+			if it.OrganizationID != uuid.Nil {
+				orgID = it.OrganizationID.String()
+			}
+			ownerRoles = append(ownerRoles, previewtypes.WorkspaceOwnerRBACRole{
+				Name:  it.Name,
+				OrgID: orgID,
+			})
+		}
+		return nil
+	})
+
+	var publicKey string
+	g.Go(func() error {
+		key, err := api.Database.GetGitSSHKey(ctx, user.ID)
+		if err != nil {
+			return err
+		}
+		publicKey = key.PublicKey
+		return nil
+	})
+
+	var groupNames []string
+	g.Go(func() error {
+		groups, err := api.Database.GetGroups(ctx, database.GetGroupsParams{
+			OrganizationID: organizationID,
+			HasMemberID:    user.ID,
 		})
-		return scope, uuid.Nil, false
-	}
+		if err != nil {
+			return err
+		}
+		groupNames = make([]string, 0, len(groups))
+		for _, it := range groups {
+			groupNames = append(groupNames, it.Group.Name)
+		}
+		return nil
+	})
 
-	id := chi.URLParam(r, "id")
-	uid, err := uuid.Parse(id)
+	err := g.Wait()
 	if err != nil {
-		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
-			Message: fmt.Sprintf("Invalid UUID %q.", id),
-			Detail:  err.Error(),
-			Validations: []codersdk.ValidationError{
-				{Field: "id", Detail: "Invalid UUID"},
-			},
-		})
-		return scope, uuid.Nil, false
+		return previewtypes.WorkspaceOwner{}, err
 	}
 
-	return scope, uid, true
+	return previewtypes.WorkspaceOwner{
+		ID:           user.ID.String(),
+		Name:         user.Username,
+		FullName:     user.Name,
+		Email:        user.Email,
+		LoginType:    string(user.LoginType),
+		RBACRoles:    ownerRoles,
+		SSHPublicKey: publicKey,
+		Groups:       groupNames,
+	}, nil
 }

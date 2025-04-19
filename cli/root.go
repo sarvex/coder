@@ -1,162 +1,218 @@
 package cli
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
-	"math/rand"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/trace"
+	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
-	"golang.org/x/exp/slices"
+	"github.com/mattn/go-isatty"
+	"github.com/mitchellh/go-wordwrap"
+	"golang.org/x/mod/semver"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
+	"github.com/coder/pretty"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-isatty"
+	"github.com/coder/serpent"
 
-	"github.com/coder/coder/buildinfo"
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/cliui"
-	"github.com/coder/coder/cli/config"
-	"github.com/coder/coder/coderd"
-	"github.com/coder/coder/coderd/gitauth"
-	"github.com/coder/coder/codersdk"
-	"github.com/coder/coder/codersdk/agentsdk"
+	"github.com/coder/coder/v2/buildinfo"
+	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/coder/v2/cli/config"
+	"github.com/coder/coder/v2/cli/gitauth"
+	"github.com/coder/coder/v2/cli/telemetry"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/codersdk/agentsdk"
 )
 
 var (
-	Caret = cliui.Styles.Prompt.String()
+	Caret = pretty.Sprint(cliui.DefaultStyles.Prompt, "")
 
 	// Applied as annotations to workspace commands
 	// so they display in a separated "help" section.
 	workspaceCommand = map[string]string{
 		"workspaces": "",
 	}
+
+	// ErrSilent is a sentinel error that tells the command handler to just exit with a non-zero error, but not print
+	// anything.
+	ErrSilent = xerrors.New("silent error")
 )
 
 const (
-	varURL              = "url"
-	varToken            = "token"
-	varAgentToken       = "agent-token"
-	varAgentURL         = "agent-url"
-	varHeader           = "header"
-	varNoOpen           = "no-open"
-	varNoVersionCheck   = "no-version-warning"
-	varNoFeatureWarning = "no-feature-warning"
-	varForceTty         = "force-tty"
-	varVerbose          = "verbose"
-	notLoggedInMessage  = "You are not logged in. Try logging in using 'coder login <url>'."
+	varURL                     = "url"
+	varToken                   = "token"
+	varAgentToken              = "agent-token"
+	varAgentTokenFile          = "agent-token-file"
+	varAgentURL                = "agent-url"
+	varHeader                  = "header"
+	varHeaderCommand           = "header-command"
+	varNoOpen                  = "no-open"
+	varNoVersionCheck          = "no-version-warning"
+	varNoFeatureWarning        = "no-feature-warning"
+	varForceTty                = "force-tty"
+	varVerbose                 = "verbose"
+	varDisableDirect           = "disable-direct-connections"
+	varDisableNetworkTelemetry = "disable-network-telemetry"
+
+	notLoggedInMessage = "You are not logged in. Try logging in using 'coder login <url>'."
 
 	envNoVersionCheck   = "CODER_NO_VERSION_WARNING"
 	envNoFeatureWarning = "CODER_NO_FEATURE_WARNING"
 	envSessionToken     = "CODER_SESSION_TOKEN"
 	//nolint:gosec
 	envAgentToken = "CODER_AGENT_TOKEN"
-	envURL        = "CODER_URL"
+	//nolint:gosec
+	envAgentTokenFile = "CODER_AGENT_TOKEN_FILE"
+	envURL            = "CODER_URL"
 )
 
-var errUnauthenticated = xerrors.New(notLoggedInMessage)
-
-func (r *RootCmd) Core() []*clibase.Cmd {
+func (r *RootCmd) CoreSubcommands() []*serpent.Command {
 	// Please re-sort this list alphabetically if you change it!
-	return []*clibase.Cmd{
+	return []*serpent.Command{
+		r.completion(),
 		r.dotfiles(),
+		r.externalAuth(),
 		r.login(),
 		r.logout(),
+		r.netcheck(),
+		r.notifications(),
+		r.organizations(),
 		r.portForward(),
 		r.publickey(),
 		r.resetPassword(),
 		r.state(),
 		r.templates(),
-		r.users(),
 		r.tokens(),
+		r.users(),
 		r.version(defaultVersionInfo),
 
 		// Workspace Commands
+		r.autoupdate(),
 		r.configSSH(),
 		r.create(),
 		r.deleteWorkspace(),
+		r.favorite(),
 		r.list(),
-		r.parameters(),
+		r.open(),
 		r.ping(),
 		r.rename(),
-		r.scaletest(),
+		r.restart(),
 		r.schedules(),
 		r.show(),
 		r.speedtest(),
 		r.ssh(),
 		r.start(),
+		r.stat(),
 		r.stop(),
+		r.unfavorite(),
 		r.update(),
-		r.restart(),
+		r.whoami(),
 
 		// Hidden
+		r.connectCmd(),
+		r.expCmd(),
 		r.gitssh(),
+		r.support(),
+		r.vpnDaemon(),
 		r.vscodeSSH(),
 		r.workspaceAgent(),
 	}
 }
 
-func (r *RootCmd) AGPL() []*clibase.Cmd {
-	all := append(r.Core(), r.Server(func(_ context.Context, o *coderd.Options) (*coderd.API, io.Closer, error) {
-		api := coderd.New(o)
-		return api, api, nil
-	}))
+func (r *RootCmd) AGPL() []*serpent.Command {
+	all := append(
+		r.CoreSubcommands(),
+		r.Server( /* Do not import coderd here. */ nil),
+		r.Provisioners(),
+	)
 	return all
 }
 
-// Main is the entrypoint for the Coder CLI.
-func (r *RootCmd) RunMain(subcommands []*clibase.Cmd) {
-	rand.Seed(time.Now().UnixMicro())
+// RunWithSubcommands runs the root command with the given subcommands.
+// It is abstracted to enable the Enterprise code to add commands.
+func (r *RootCmd) RunWithSubcommands(subcommands []*serpent.Command) {
+	// This configuration is not available as a standard option because we
+	// want to trace the entire program, including Options parsing.
+	goTraceFilePath, ok := os.LookupEnv("CODER_GO_TRACE")
+	if ok {
+		traceFile, err := os.OpenFile(goTraceFilePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		if err != nil {
+			panic(fmt.Sprintf("failed to open trace file: %v", err))
+		}
+		defer traceFile.Close()
+
+		if err := trace.Start(traceFile); err != nil {
+			panic(fmt.Sprintf("failed to start trace: %v", err))
+		}
+		defer trace.Stop()
+	}
 
 	cmd, err := r.Command(subcommands)
 	if err != nil {
 		panic(err)
 	}
-
 	err = cmd.Invoke().WithOS().Run()
 	if err != nil {
-		if errors.Is(err, cliui.Canceled) {
-			//nolint:revive
-			os.Exit(1)
+		code := 1
+		var exitErr *exitError
+		if errors.As(err, &exitErr) {
+			code = exitErr.code
+			err = exitErr.err
 		}
-		f := prettyErrorFormatter{w: os.Stderr}
-		f.format(err)
-		//nolint:revive
-		os.Exit(1)
+		if errors.Is(err, cliui.ErrCanceled) {
+			//nolint:revive,gocritic
+			os.Exit(code)
+		}
+		if errors.Is(err, ErrSilent) {
+			//nolint:revive,gocritic
+			os.Exit(code)
+		}
+		f := PrettyErrorFormatter{w: os.Stderr, verbose: r.verbose}
+		if err != nil {
+			f.Format(err)
+		}
+		//nolint:revive,gocritic
+		os.Exit(code)
 	}
 }
 
-func (r *RootCmd) Command(subcommands []*clibase.Cmd) (*clibase.Cmd, error) {
+func (r *RootCmd) Command(subcommands []*serpent.Command) (*serpent.Command, error) {
 	fmtLong := `Coder %s — A tool for provisioning self-hosted development environments with Terraform.
 `
-	cmd := &clibase.Cmd{
+	cmd := &serpent.Command{
 		Use: "coder [global-flags] <subcommand>",
-		Long: fmt.Sprintf(fmtLong, buildinfo.Version()) + formatExamples(
-			example{
+		Long: fmt.Sprintf(fmtLong, buildinfo.Version()) + FormatExamples(
+			Example{
 				Description: "Start a Coder server",
 				Command:     "coder server",
 			},
-			example{
+			Example{
 				Description: "Get started by creating a template from an example",
 				Command:     "coder templates init",
 			},
 		),
-		Handler: func(i *clibase.Invocation) error {
-			// fmt.Fprintf(i.Stderr, "env debug: %+v", i.Environ)
+		Handler: func(i *serpent.Invocation) error {
+			if r.versionFlag {
+				return r.version(defaultVersionInfo).Handler(i)
+			}
 			// The GIT_ASKPASS environment variable must point at
 			// a binary with no arguments. To prevent writing
 			// cross-platform scripts to invoke the Coder binary
@@ -172,7 +228,7 @@ func (r *RootCmd) Command(subcommands []*clibase.Cmd) (*clibase.Cmd, error) {
 	cmd.AddSubcommands(subcommands...)
 
 	// Set default help handler for all commands.
-	cmd.Walk(func(c *clibase.Cmd) {
+	cmd.Walk(func(c *serpent.Command) {
 		if c.HelpHandler == nil {
 			c.HelpHandler = helpFn()
 		}
@@ -180,7 +236,7 @@ func (r *RootCmd) Command(subcommands []*clibase.Cmd) (*clibase.Cmd, error) {
 
 	var merr error
 	// Add [flags] to usage when appropriate.
-	cmd.Walk(func(cmd *clibase.Cmd) {
+	cmd.Walk(func(cmd *serpent.Command) {
 		const flags = "[flags]"
 		if strings.Contains(cmd.Use, flags) {
 			merr = errors.Join(
@@ -215,8 +271,8 @@ func (r *RootCmd) Command(subcommands []*clibase.Cmd) (*clibase.Cmd, error) {
 		cmd.Use = fmt.Sprintf("%s %s %s", tokens[0], flags, tokens[1])
 	})
 
-	// Add alises when appropriate.
-	cmd.Walk(func(cmd *clibase.Cmd) {
+	// Add aliases when appropriate.
+	cmd.Walk(func(cmd *serpent.Command) {
 		// TODO: we should really be consistent about naming.
 		if cmd.Name() == "delete" || cmd.Name() == "remove" {
 			if slices.Contains(cmd.Aliases, "rm") {
@@ -231,7 +287,7 @@ func (r *RootCmd) Command(subcommands []*clibase.Cmd) (*clibase.Cmd, error) {
 	})
 
 	// Sanity-check command options.
-	cmd.Walk(func(cmd *clibase.Cmd) {
+	cmd.Walk(func(cmd *serpent.Command) {
 		for _, opt := range cmd.Options {
 			// Verify that every option is configurable.
 			if opt.Flag == "" && opt.Env == "" {
@@ -254,9 +310,21 @@ func (r *RootCmd) Command(subcommands []*clibase.Cmd) (*clibase.Cmd, error) {
 	var debugOptions bool
 
 	// Add a wrapper to every command to enable debugging options.
-	cmd.Walk(func(cmd *clibase.Cmd) {
+	cmd.Walk(func(cmd *serpent.Command) {
 		h := cmd.Handler
-		cmd.Handler = func(i *clibase.Invocation) error {
+		if h == nil {
+			// We should never have a nil handler, but if we do, do not
+			// wrap it. Wrapping it just hides a nil pointer dereference.
+			// If a nil handler exists, this is a developer bug. If no handler
+			// is required for a command such as command grouping (e.g. `users'
+			// and 'groups'), then the handler should be set to the helper
+			// function.
+			//	func(inv *serpent.Invocation) error {
+			//		return inv.Command.HelpHandler(inv)
+			//	}
+			return
+		}
+		cmd.Handler = func(i *serpent.Invocation) error {
 			if !debugOptions {
 				return h(i)
 			}
@@ -271,6 +339,15 @@ func (r *RootCmd) Command(subcommands []*clibase.Cmd) (*clibase.Cmd, error) {
 		}
 	})
 
+	// Add the PrintDeprecatedOptions middleware to all commands.
+	cmd.Walk(func(cmd *serpent.Command) {
+		if cmd.Middleware == nil {
+			cmd.Middleware = PrintDeprecatedOptions()
+		} else {
+			cmd.Middleware = serpent.Chain(cmd.Middleware, PrintDeprecatedOptions())
+		}
+	})
+
 	if r.agentURL == nil {
 		r.agentURL = new(url.URL)
 	}
@@ -278,36 +355,44 @@ func (r *RootCmd) Command(subcommands []*clibase.Cmd) (*clibase.Cmd, error) {
 		r.clientURL = new(url.URL)
 	}
 
-	globalGroup := &clibase.Group{
+	globalGroup := &serpent.Group{
 		Name:        "Global",
 		Description: `Global options are applied to all commands. They can be set using environment variables or flags.`,
 	}
-	cmd.Options = clibase.OptionSet{
+	cmd.Options = serpent.OptionSet{
 		{
 			Flag:        varURL,
 			Env:         envURL,
 			Description: "URL to a deployment.",
-			Value:       clibase.URLOf(r.clientURL),
+			Value:       serpent.URLOf(r.clientURL),
 			Group:       globalGroup,
 		},
 		{
 			Flag:        "debug-options",
 			Description: "Print all options, how they're set, then exit.",
-			Value:       clibase.BoolOf(&debugOptions),
+			Value:       serpent.BoolOf(&debugOptions),
 			Group:       globalGroup,
 		},
 		{
 			Flag:        varToken,
 			Env:         envSessionToken,
 			Description: fmt.Sprintf("Specify an authentication token. For security reasons setting %s is preferred.", envSessionToken),
-			Value:       clibase.StringOf(&r.token),
+			Value:       serpent.StringOf(&r.token),
 			Group:       globalGroup,
 		},
 		{
 			Flag:        varAgentToken,
 			Env:         envAgentToken,
 			Description: "An agent authentication token.",
-			Value:       clibase.StringOf(&r.agentToken),
+			Value:       serpent.StringOf(&r.agentToken),
+			Hidden:      true,
+			Group:       globalGroup,
+		},
+		{
+			Flag:        varAgentTokenFile,
+			Env:         envAgentTokenFile,
+			Description: "A file containing an agent authentication token.",
+			Value:       serpent.StringOf(&r.agentTokenFile),
 			Hidden:      true,
 			Group:       globalGroup,
 		},
@@ -315,7 +400,7 @@ func (r *RootCmd) Command(subcommands []*clibase.Cmd) (*clibase.Cmd, error) {
 			Flag:        varAgentURL,
 			Env:         "CODER_AGENT_URL",
 			Description: "URL for an agent to access your deployment.",
-			Value:       clibase.URLOf(r.agentURL),
+			Value:       serpent.URLOf(r.agentURL),
 			Hidden:      true,
 			Group:       globalGroup,
 		},
@@ -323,37 +408,44 @@ func (r *RootCmd) Command(subcommands []*clibase.Cmd) (*clibase.Cmd, error) {
 			Flag:        varNoVersionCheck,
 			Env:         envNoVersionCheck,
 			Description: "Suppress warning when client and server versions do not match.",
-			Value:       clibase.BoolOf(&r.noVersionCheck),
+			Value:       serpent.BoolOf(&r.noVersionCheck),
 			Group:       globalGroup,
 		},
 		{
 			Flag:        varNoFeatureWarning,
 			Env:         envNoFeatureWarning,
 			Description: "Suppress warnings about unlicensed features.",
-			Value:       clibase.BoolOf(&r.noFeatureWarning),
+			Value:       serpent.BoolOf(&r.noFeatureWarning),
 			Group:       globalGroup,
 		},
 		{
 			Flag:        varHeader,
 			Env:         "CODER_HEADER",
 			Description: "Additional HTTP headers added to all requests. Provide as " + `key=value` + ". Can be specified multiple times.",
-			Value:       clibase.StringArrayOf(&r.header),
+			Value:       serpent.StringArrayOf(&r.header),
+			Group:       globalGroup,
+		},
+		{
+			Flag:        varHeaderCommand,
+			Env:         "CODER_HEADER_COMMAND",
+			Description: "An external command that outputs additional HTTP headers added to all requests. The command must output each header as `key=value` on its own line.",
+			Value:       serpent.StringOf(&r.headerCommand),
 			Group:       globalGroup,
 		},
 		{
 			Flag:        varNoOpen,
 			Env:         "CODER_NO_OPEN",
-			Description: "Suppress opening the browser after logging in.",
-			Value:       clibase.BoolOf(&r.noOpen),
+			Description: "Suppress opening the browser when logging in, or starting the server.",
+			Value:       serpent.BoolOf(&r.noOpen),
 			Hidden:      true,
 			Group:       globalGroup,
 		},
 		{
 			Flag:        varForceTty,
 			Env:         "CODER_FORCE_TTY",
-			Hidden:      true,
+			Hidden:      false,
 			Description: "Force the use of a TTY.",
-			Value:       clibase.BoolOf(&r.forceTTY),
+			Value:       serpent.BoolOf(&r.forceTTY),
 			Group:       globalGroup,
 		},
 		{
@@ -361,13 +453,27 @@ func (r *RootCmd) Command(subcommands []*clibase.Cmd) (*clibase.Cmd, error) {
 			FlagShorthand: "v",
 			Env:           "CODER_VERBOSE",
 			Description:   "Enable verbose output.",
-			Value:         clibase.BoolOf(&r.verbose),
+			Value:         serpent.BoolOf(&r.verbose),
 			Group:         globalGroup,
+		},
+		{
+			Flag:        varDisableDirect,
+			Env:         "CODER_DISABLE_DIRECT_CONNECTIONS",
+			Description: "Disable direct (P2P) connections to workspaces.",
+			Value:       serpent.BoolOf(&r.disableDirect),
+			Group:       globalGroup,
+		},
+		{
+			Flag:        varDisableNetworkTelemetry,
+			Env:         "CODER_DISABLE_NETWORK_TELEMETRY",
+			Description: "Disable network telemetry. Network telemetry is collected when connecting to workspaces using the CLI, and is forwarded to the server. If telemetry is also enabled on the server, it may be sent to Coder. Network telemetry is used to measure network quality and detect regressions.",
+			Value:       serpent.BoolOf(&r.disableNetworkTelemetry),
+			Group:       globalGroup,
 		},
 		{
 			Flag:        "debug-http",
 			Description: "Debug codersdk HTTP requests.",
-			Value:       clibase.BoolOf(&r.debugHTTP),
+			Value:       serpent.BoolOf(&r.debugHTTP),
 			Group:       globalGroup,
 			Hidden:      true,
 		},
@@ -376,73 +482,59 @@ func (r *RootCmd) Command(subcommands []*clibase.Cmd) (*clibase.Cmd, error) {
 			Env:         "CODER_CONFIG_DIR",
 			Description: "Path to the global `coder` config directory.",
 			Default:     config.DefaultDir(),
-			Value:       clibase.StringOf(&r.globalConfig),
+			Value:       serpent.StringOf(&r.globalConfig),
 			Group:       globalGroup,
 		},
-	}
-
-	err := cmd.PrepareAll()
-	if err != nil {
-		return nil, err
+		{
+			Flag: "version",
+			// This was requested by a customer to assist with their migration.
+			// They have two Coder CLIs, and want to tell the difference by running
+			// the same base command.
+			Description: "Run the version command. Useful for v1 customers migrating to v2.",
+			Value:       serpent.BoolOf(&r.versionFlag),
+			Hidden:      true,
+		},
 	}
 
 	return cmd, nil
 }
 
-type contextKey int
-
-const (
-	contextKeyLogger contextKey = iota
-)
-
-func ContextWithLogger(ctx context.Context, l slog.Logger) context.Context {
-	return context.WithValue(ctx, contextKeyLogger, l)
-}
-
-func LoggerFromContext(ctx context.Context) (slog.Logger, bool) {
-	l, ok := ctx.Value(contextKeyLogger).(slog.Logger)
-	return l, ok
-}
-
-func isTest() bool {
-	return flag.Lookup("test.v") != nil
-}
-
 // RootCmd contains parameters and helpers useful to all commands.
 type RootCmd struct {
-	clientURL    *url.URL
-	token        string
-	globalConfig string
-	header       []string
-	agentToken   string
-	agentURL     *url.URL
-	forceTTY     bool
-	noOpen       bool
-	verbose      bool
-	debugHTTP    bool
+	clientURL      *url.URL
+	token          string
+	globalConfig   string
+	header         []string
+	headerCommand  string
+	agentToken     string
+	agentTokenFile string
+	agentURL       *url.URL
+	forceTTY       bool
+	noOpen         bool
+	verbose        bool
+	versionFlag    bool
+	disableDirect  bool
+	debugHTTP      bool
 
-	noVersionCheck   bool
-	noFeatureWarning bool
+	disableNetworkTelemetry bool
+	noVersionCheck          bool
+	noFeatureWarning        bool
 }
 
-// InitClient sets client to a new client.
-// It reads from global configuration files if flags are not set.
-func (r *RootCmd) InitClient(client *codersdk.Client) clibase.MiddlewareFunc {
-	if client == nil {
-		panic("client is nil")
-	}
-	if r == nil {
-		panic("root is nil")
-	}
-	return func(next clibase.HandlerFunc) clibase.HandlerFunc {
-		return func(i *clibase.Invocation) error {
+// InitClient authenticates the client with files from disk
+// and injects header middlewares for telemetry, authentication,
+// and version checks.
+func (r *RootCmd) InitClient(client *codersdk.Client) serpent.MiddlewareFunc {
+	return func(next serpent.HandlerFunc) serpent.HandlerFunc {
+		return func(inv *serpent.Invocation) error {
 			conf := r.createConfig()
 			var err error
+			// Read the client URL stored on disk.
 			if r.clientURL == nil || r.clientURL.String() == "" {
 				rawURL, err := conf.URL().Read()
 				// If the configuration files are absent, the user is logged out
 				if os.IsNotExist(err) {
-					return (errUnauthenticated)
+					return xerrors.New(notLoggedInMessage)
 				}
 				if err != nil {
 					return err
@@ -453,87 +545,70 @@ func (r *RootCmd) InitClient(client *codersdk.Client) clibase.MiddlewareFunc {
 					return err
 				}
 			}
-
+			// Read the token stored on disk.
 			if r.token == "" {
 				r.token, err = conf.Session().Read()
-				// If the configuration files are absent, the user is logged out
-				if os.IsNotExist(err) {
-					return (errUnauthenticated)
-				}
-				if err != nil {
+				// Even if there isn't a token, we don't care.
+				// Some API routes can be unauthenticated.
+				if err != nil && !os.IsNotExist(err) {
 					return err
 				}
 			}
 
-			err = r.setClient(client, r.clientURL)
+			err = r.configureClient(inv.Context(), client, r.clientURL, inv)
 			if err != nil {
 				return err
 			}
-
 			client.SetSessionToken(r.token)
 
 			if r.debugHTTP {
 				client.PlainLogger = os.Stderr
-				client.LogBodies = true
+				client.SetLogBodies(true)
 			}
-
-			// We send these requests in parallel to minimize latency.
-			var (
-				versionErr = make(chan error)
-				warningErr = make(chan error)
-			)
-			go func() {
-				versionErr <- r.checkVersions(i, client)
-				close(versionErr)
-			}()
-
-			go func() {
-				warningErr <- r.checkWarnings(i, client)
-				close(warningErr)
-			}()
-
-			if err = <-versionErr; err != nil {
-				// Just log the error here. We never want to fail a command
-				// due to a pre-run.
-				_, _ = fmt.Fprintf(i.Stderr,
-					cliui.Styles.Warn.Render("check versions error: %s"), err)
-				_, _ = fmt.Fprintln(i.Stderr)
-			}
-
-			if err = <-warningErr; err != nil {
-				// Same as above
-				_, _ = fmt.Fprintf(i.Stderr,
-					cliui.Styles.Warn.Render("check entitlement warnings error: %s"), err)
-				_, _ = fmt.Fprintln(i.Stderr)
-			}
-
-			return next(i)
+			client.DisableDirectConnections = r.disableDirect
+			return next(inv)
 		}
 	}
 }
 
-func (r *RootCmd) setClient(client *codersdk.Client, serverURL *url.URL) error {
-	transport := &headerTransport{
-		transport: http.DefaultTransport,
-		header:    http.Header{},
+// HeaderTransport creates a new transport that executes `--header-command`
+// if it is set to add headers for all outbound requests.
+func (r *RootCmd) HeaderTransport(ctx context.Context, serverURL *url.URL) (*codersdk.HeaderTransport, error) {
+	return headerTransport(ctx, serverURL, r.header, r.headerCommand)
+}
+
+func (r *RootCmd) configureClient(ctx context.Context, client *codersdk.Client, serverURL *url.URL, inv *serpent.Invocation) error {
+	transport := http.DefaultTransport
+	transport = wrapTransportWithTelemetryHeader(transport, inv)
+	if !r.noVersionCheck {
+		transport = wrapTransportWithVersionMismatchCheck(transport, inv, buildinfo.Version(), func(ctx context.Context) (codersdk.BuildInfoResponse, error) {
+			// Create a new client without any wrapped transport
+			// otherwise it creates an infinite loop!
+			basicClient := codersdk.New(serverURL)
+			return basicClient.BuildInfo(ctx)
+		})
 	}
-	for _, header := range r.header {
-		parts := strings.SplitN(header, "=", 2)
-		if len(parts) < 2 {
-			return xerrors.Errorf("split header %q had less than two parts", header)
-		}
-		transport.header.Add(parts[0], parts[1])
+	if !r.noFeatureWarning {
+		transport = wrapTransportWithEntitlementsCheck(transport, inv.Stderr)
+	}
+	headerTransport, err := r.HeaderTransport(ctx, serverURL)
+	if err != nil {
+		return xerrors.Errorf("create header transport: %w", err)
+	}
+	// The header transport has to come last.
+	// codersdk checks for the header transport to get headers
+	// to clone on the DERP client.
+	headerTransport.Transport = transport
+	client.HTTPClient = &http.Client{
+		Transport: headerTransport,
 	}
 	client.URL = serverURL
-	client.HTTPClient = &http.Client{
-		Transport: transport,
-	}
 	return nil
 }
 
-func (r *RootCmd) createUnauthenticatedClient(serverURL *url.URL) (*codersdk.Client, error) {
+func (r *RootCmd) createUnauthenticatedClient(ctx context.Context, serverURL *url.URL, inv *serpent.Invocation) (*codersdk.Client, error) {
 	var client codersdk.Client
-	err := r.setClient(&client, serverURL)
+	err := r.configureClient(ctx, &client, serverURL, inv)
 	return &client, err
 }
 
@@ -545,36 +620,113 @@ func (r *RootCmd) createAgentClient() (*agentsdk.Client, error) {
 	return client, nil
 }
 
-// CurrentOrganization returns the currently active organization for the authenticated user.
-func CurrentOrganization(inv *clibase.Invocation, client *codersdk.Client) (codersdk.Organization, error) {
+type OrganizationContext struct {
+	// FlagSelect is the value passed in via the --org flag
+	FlagSelect string
+}
+
+func NewOrganizationContext() *OrganizationContext {
+	return &OrganizationContext{}
+}
+
+func (*OrganizationContext) optionName() string { return "Organization" }
+func (o *OrganizationContext) AttachOptions(cmd *serpent.Command) {
+	cmd.Options = append(cmd.Options, serpent.Option{
+		Name:        o.optionName(),
+		Description: "Select which organization (uuid or name) to use.",
+		// Only required if the user is a part of more than 1 organization.
+		// Otherwise, we can assume a default value.
+		Required:      false,
+		Flag:          "org",
+		FlagShorthand: "O",
+		Env:           "CODER_ORGANIZATION",
+		Value:         serpent.StringOf(&o.FlagSelect),
+	})
+}
+
+func (o *OrganizationContext) ValueSource(inv *serpent.Invocation) (string, serpent.ValueSource) {
+	opt := inv.Command.Options.ByName(o.optionName())
+	if opt == nil {
+		return o.FlagSelect, serpent.ValueSourceNone
+	}
+	return o.FlagSelect, opt.ValueSource
+}
+
+func (o *OrganizationContext) Selected(inv *serpent.Invocation, client *codersdk.Client) (codersdk.Organization, error) {
+	// Fetch the set of organizations the user is a member of.
 	orgs, err := client.OrganizationsByUser(inv.Context(), codersdk.Me)
 	if err != nil {
-		return codersdk.Organization{}, nil
+		return codersdk.Organization{}, xerrors.Errorf("get organizations: %w", err)
 	}
-	// For now, we won't use the config to set this.
-	// Eventually, we will support changing using "coder switch <org>"
-	return orgs[0], nil
+
+	// User manually selected an organization
+	if o.FlagSelect != "" {
+		index := slices.IndexFunc(orgs, func(org codersdk.Organization) bool {
+			return org.Name == o.FlagSelect || org.ID.String() == o.FlagSelect
+		})
+
+		if index < 0 {
+			var names []string
+			for _, org := range orgs {
+				names = append(names, org.Name)
+			}
+			return codersdk.Organization{}, xerrors.Errorf("organization %q not found, are you sure you are a member of this organization? "+
+				"Valid options for '--org=' are [%s].", o.FlagSelect, strings.Join(names, ", "))
+		}
+		return orgs[index], nil
+	}
+
+	if len(orgs) == 1 {
+		return orgs[0], nil
+	}
+
+	// No org selected, and we are more than 1? Return an error.
+	validOrgs := make([]string, 0, len(orgs))
+	for _, org := range orgs {
+		validOrgs = append(validOrgs, org.Name)
+	}
+
+	return codersdk.Organization{}, xerrors.Errorf("Must select an organization with --org=<org_name>. Choose from: %s", strings.Join(validOrgs, ", "))
+}
+
+func splitNamedWorkspace(identifier string) (owner string, workspaceName string, err error) {
+	parts := strings.Split(identifier, "/")
+
+	switch len(parts) {
+	case 1:
+		owner = codersdk.Me
+		workspaceName = parts[0]
+	case 2:
+		owner = parts[0]
+		workspaceName = parts[1]
+	default:
+		return "", "", xerrors.Errorf("invalid workspace name: %q", identifier)
+	}
+	return owner, workspaceName, nil
 }
 
 // namedWorkspace fetches and returns a workspace by an identifier, which may be either
 // a bare name (for a workspace owned by the current user) or a "user/workspace" combination,
 // where user is either a username or UUID.
 func namedWorkspace(ctx context.Context, client *codersdk.Client, identifier string) (codersdk.Workspace, error) {
-	parts := strings.Split(identifier, "/")
-
-	var owner, name string
-	switch len(parts) {
-	case 1:
-		owner = codersdk.Me
-		name = parts[0]
-	case 2:
-		owner = parts[0]
-		name = parts[1]
-	default:
-		return codersdk.Workspace{}, xerrors.Errorf("invalid workspace name: %q", identifier)
+	owner, name, err := splitNamedWorkspace(identifier)
+	if err != nil {
+		return codersdk.Workspace{}, err
 	}
-
 	return client.WorkspaceByOwnerAndName(ctx, owner, name, codersdk.WorkspaceOptions{})
+}
+
+func initAppearance(client *codersdk.Client, outConfig *codersdk.AppearanceConfig) serpent.MiddlewareFunc {
+	return func(next serpent.HandlerFunc) serpent.HandlerFunc {
+		return func(inv *serpent.Invocation) error {
+			cfg, _ := client.Appearance(inv.Context())
+			if cfg.DocsURL == "" {
+				cfg.DocsURL = codersdk.DefaultDocsURL()
+			}
+			*outConfig = cfg
+			return next(inv)
+		}
+	}
 }
 
 // createConfig consumes the global configuration flag to produce a config root.
@@ -582,8 +734,8 @@ func (r *RootCmd) createConfig() config.Root {
 	return config.Root(r.globalConfig)
 }
 
-// isTTY returns whether the passed reader is a TTY or not.
-func isTTY(inv *clibase.Invocation) bool {
+// isTTYIn returns whether the passed invocation is having stdin read from a TTY
+func isTTYIn(inv *serpent.Invocation) bool {
 	// If the `--force-tty` command is available, and set,
 	// assume we're in a tty. This is primarily for cases on Windows
 	// where we may not be able to reliably detect this automatically (ie, tests)
@@ -598,17 +750,17 @@ func isTTY(inv *clibase.Invocation) bool {
 	return isatty.IsTerminal(file.Fd())
 }
 
-// isTTYOut returns whether the passed reader is a TTY or not.
-func isTTYOut(inv *clibase.Invocation) bool {
+// isTTYOut returns whether the passed invocation is having stdout written to a TTY
+func isTTYOut(inv *serpent.Invocation) bool {
 	return isTTYWriter(inv, inv.Stdout)
 }
 
-// isTTYErr returns whether the passed reader is a TTY or not.
-func isTTYErr(inv *clibase.Invocation) bool {
+// isTTYErr returns whether the passed invocation is having stderr written to a TTY
+func isTTYErr(inv *serpent.Invocation) bool {
 	return isTTYWriter(inv, inv.Stderr)
 }
 
-func isTTYWriter(inv *clibase.Invocation, writer io.Writer) bool {
+func isTTYWriter(inv *serpent.Invocation, writer io.Writer) bool {
 	// If the `--force-tty` command is available, and set,
 	// assume we're in a tty. This is primarily for cases on Windows
 	// where we may not be able to reliably detect this automatically (ie, tests)
@@ -623,27 +775,30 @@ func isTTYWriter(inv *clibase.Invocation, writer io.Writer) bool {
 	return isatty.IsTerminal(file.Fd())
 }
 
-// example represents a standard example for command usage, to be used
-// with formatExamples.
-type example struct {
+// Example represents a standard example for command usage, to be used
+// with FormatExamples.
+type Example struct {
 	Description string
 	Command     string
 }
 
-// formatExamples formats the examples as width wrapped bulletpoint
+// FormatExamples formats the examples as width wrapped bulletpoint
 // descriptions with the command underneath.
-func formatExamples(examples ...example) string {
-	wrap := cliui.Styles.Wrap.Copy()
-	wrap.PaddingLeft(4)
+func FormatExamples(examples ...Example) string {
 	var sb strings.Builder
+
+	padStyle := cliui.DefaultStyles.Wrap.With(pretty.XPad(4, 0))
 	for i, e := range examples {
 		if len(e.Description) > 0 {
-			_, _ = sb.WriteString("  - " + wrap.Render(e.Description + ":")[4:] + "\n\n    ")
+			wordwrap.WrapString(e.Description, 80)
+			_, _ = sb.WriteString(
+				"  - " + pretty.Sprint(padStyle, e.Description+":")[4:] + "\n\n    ",
+			)
 		}
-		// We add 1 space here because `cliui.Styles.Code` adds an extra
+		// We add 1 space here because `cliui.DefaultStyles.Code` adds an extra
 		// space. This makes the code block align at an even 2 or 6
 		// spaces for symmetry.
-		_, _ = sb.WriteString(" " + cliui.Styles.Code.Render(fmt.Sprintf("$ %s", e.Command)))
+		_, _ = sb.WriteString(" " + pretty.Sprint(cliui.DefaultStyles.Code, fmt.Sprintf("$ %s", e.Command)))
 		if i < len(examples)-1 {
 			_, _ = sb.WriteString("\n\n")
 		}
@@ -651,77 +806,11 @@ func formatExamples(examples ...example) string {
 	return sb.String()
 }
 
-func (r *RootCmd) checkVersions(i *clibase.Invocation, client *codersdk.Client) error {
-	if r.noVersionCheck {
-		return nil
+// Verbosef logs a message if verbose mode is enabled.
+func (r *RootCmd) Verbosef(inv *serpent.Invocation, fmtStr string, args ...interface{}) {
+	if r.verbose {
+		cliui.Infof(inv.Stdout, fmtStr, args...)
 	}
-
-	ctx, cancel := context.WithTimeout(i.Context(), 10*time.Second)
-	defer cancel()
-
-	clientVersion := buildinfo.Version()
-	info, err := client.BuildInfo(ctx)
-	// Avoid printing errors that are connection-related.
-	if isConnectionError(err) {
-		return nil
-	}
-
-	if err != nil {
-		return xerrors.Errorf("build info: %w", err)
-	}
-
-	fmtWarningText := `version mismatch: client %s, server %s
-`
-	// Our installation script doesn't work on Windows, so instead we direct the user
-	// to the GitHub release page to download the latest installer.
-	if runtime.GOOS == "windows" {
-		fmtWarningText += `download the server version from: https://github.com/coder/coder/releases/v%s`
-	} else {
-		fmtWarningText += `download the server version with: 'curl -L https://coder.com/install.sh | sh -s -- --version %s'`
-	}
-
-	if !buildinfo.VersionsMatch(clientVersion, info.Version) {
-		warn := cliui.Styles.Warn.Copy().Align(lipgloss.Left)
-		_, _ = fmt.Fprintf(i.Stderr, warn.Render(fmtWarningText), clientVersion, info.Version, strings.TrimPrefix(info.CanonicalVersion(), "v"))
-		_, _ = fmt.Fprintln(i.Stderr)
-	}
-
-	return nil
-}
-
-func (r *RootCmd) checkWarnings(i *clibase.Invocation, client *codersdk.Client) error {
-	if r.noFeatureWarning {
-		return nil
-	}
-
-	ctx, cancel := context.WithTimeout(i.Context(), 10*time.Second)
-	defer cancel()
-
-	entitlements, err := client.Entitlements(ctx)
-	if err == nil {
-		for _, w := range entitlements.Warnings {
-			_, _ = fmt.Fprintln(i.Stderr, cliui.Styles.Warn.Render(w))
-		}
-	}
-	return nil
-}
-
-type headerTransport struct {
-	transport http.RoundTripper
-	header    http.Header
-}
-
-func (h *headerTransport) Header() http.Header {
-	return h.header.Clone()
-}
-
-func (h *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	for k, v := range h.header {
-		for _, vv := range v {
-			req.Header.Add(k, vv)
-		}
-	}
-	return h.transport.RoundTrip(req)
 }
 
 // DumpHandler provides a custom SIGQUIT and SIGTRAP handler that dumps the
@@ -736,7 +825,7 @@ func (h *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // A SIGQUIT handler will not be registered if GOTRACEBACK=crash.
 //
 // On Windows this immediately returns.
-func DumpHandler(ctx context.Context) {
+func DumpHandler(ctx context.Context, name string) {
 	if runtime.GOOS == "windows" {
 		// free up the goroutine since it'll be permanently blocked anyways
 		return
@@ -791,7 +880,11 @@ func DumpHandler(ctx context.Context) {
 		if err != nil {
 			dir = os.TempDir()
 		}
-		fpath := filepath.Join(dir, fmt.Sprintf("coder-agent-%s.dump", time.Now().Format("2006-01-02T15:04:05.000Z")))
+		// Make the time filesystem-safe, for example ":" is not
+		// permitted on many filesystems. Note that Z here only appends
+		// Z to the string, it does not actually change the time zone.
+		filesystemSafeTime := time.Now().UTC().Format("2006-01-02T15-04-05.000Z")
+		fpath := filepath.Join(dir, fmt.Sprintf("coder-%s-%s.dump", name, filesystemSafeTime))
 		_, _ = fmt.Fprintf(os.Stderr, "writing dump to %q\n", fpath)
 
 		f, err := os.Create(fpath)
@@ -808,84 +901,499 @@ func DumpHandler(ctx context.Context) {
 
 	done:
 		if sigStr == "SIGQUIT" {
-			//nolint:revive
+			//nolint:revive,gocritic
 			os.Exit(1)
 		}
 	}
 }
 
-// IiConnectionErr is a convenience function for checking if the source of an
-// error is due to a 'connection refused', 'no such host', etc.
-func isConnectionError(err error) bool {
-	var (
-		// E.g. no such host
-		dnsErr *net.DNSError
-		// Eg. connection refused
-		opErr *net.OpError
-	)
-
-	return xerrors.As(err, &dnsErr) || xerrors.As(err, &opErr)
+type exitError struct {
+	code int
+	err  error
 }
 
-type prettyErrorFormatter struct {
+var _ error = (*exitError)(nil)
+
+func (e *exitError) Error() string {
+	if e.err != nil {
+		return fmt.Sprintf("exit code %d: %v", e.code, e.err)
+	}
+	return fmt.Sprintf("exit code %d", e.code)
+}
+
+func (e *exitError) Unwrap() error {
+	return e.err
+}
+
+// ExitError returns an error that will cause the CLI to exit with the given
+// exit code. If err is non-nil, it will be wrapped by the returned error.
+func ExitError(code int, err error) error {
+	return &exitError{code: code, err: err}
+}
+
+// NewPrettyErrorFormatter creates a new PrettyErrorFormatter.
+func NewPrettyErrorFormatter(w io.Writer, verbose bool) *PrettyErrorFormatter {
+	return &PrettyErrorFormatter{
+		w:       w,
+		verbose: verbose,
+	}
+}
+
+type PrettyErrorFormatter struct {
 	w io.Writer
+	// verbose turns on more detailed error logs, such as stack traces.
+	verbose bool
 }
 
-func (p *prettyErrorFormatter) format(err error) {
-	errTail := errors.Unwrap(err)
+// Format formats the error to the writer in PrettyErrorFormatter.
+// This error should be human readable.
+func (p *PrettyErrorFormatter) Format(err error) {
+	output, _ := cliHumanFormatError("", err, &formatOpts{
+		Verbose: p.verbose,
+	})
+	// always trail with a newline
+	_, _ = p.w.Write([]byte(output + "\n"))
+}
 
-	//nolint:errorlint
-	if _, ok := err.(*clibase.RunCommandError); ok && errTail != nil {
-		// Avoid extra nesting.
-		p.format(errTail)
-		return
+type formatOpts struct {
+	Verbose bool
+}
+
+const indent = "    "
+
+// cliHumanFormatError formats an error for the CLI. Newlines and styling are
+// included. The second return value is true if the error is special and the error
+// chain has custom formatting applied.
+//
+// If you change this code, you can use the cli "example-errors" tool to
+// verify all errors still look ok.
+//
+//	go run main.go exp example-error <type>
+//	       go run main.go exp example-error api
+//	       go run main.go exp example-error cmd
+//	       go run main.go exp example-error multi-error
+//	       go run main.go exp example-error validation
+//
+//nolint:errorlint
+func cliHumanFormatError(from string, err error, opts *formatOpts) (string, bool) {
+	if opts == nil {
+		opts = &formatOpts{}
+	}
+	if err == nil {
+		return "<nil>", true
 	}
 
-	var headErr string
-	if errTail != nil {
-		headErr = strings.TrimSuffix(err.Error(), ": "+errTail.Error())
-	} else {
-		headErr = err.Error()
-	}
-
-	var msg string
-	var sdkError *codersdk.Error
-	if errors.As(err, &sdkError) {
-		// We don't want to repeat the same error message twice, so we
-		// only show the SDK error on the top of the stack.
-		msg = sdkError.Message
-		if sdkError.Helper != "" {
-			msg = msg + "\n" + sdkError.Helper
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		multiErrors := multi.Unwrap()
+		if len(multiErrors) == 1 {
+			// Format as a single error
+			return cliHumanFormatError(from, multiErrors[0], opts)
 		}
-		// The SDK error is usually good enough, and we don't want to overwhelm
-		// the user with output.
-		errTail = nil
-	} else {
-		msg = headErr
+		return formatMultiError(from, multiErrors, opts), true
 	}
 
-	headStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#D16644"))
-	p.printf(
-		headStyle,
-		"%s",
-		msg,
-	)
-
-	tailStyle := headStyle.Copy().Foreground(lipgloss.Color("#969696"))
-
-	if errTail != nil {
-		p.printf(headStyle, ": ")
-		// Grey out the less important, deep errors.
-		p.printf(tailStyle, "%s", errTail.Error())
+	// First check for sentinel errors that we want to handle specially.
+	// Order does matter! We want to check for the most specific errors first.
+	if sdkError, ok := err.(*codersdk.Error); ok {
+		return formatCoderSDKError(from, sdkError, opts), true
 	}
-	p.printf(tailStyle, "\n")
+
+	if cmdErr, ok := err.(*serpent.RunCommandError); ok {
+		// no need to pass the "from" context to this since it is always
+		// top level. We care about what is below this.
+		return formatRunCommandError(cmdErr, opts), true
+	}
+
+	uw, ok := err.(interface{ Unwrap() error })
+	if ok {
+		msg, special := cliHumanFormatError(from+traceError(err), uw.Unwrap(), opts)
+		if special {
+			return msg, special
+		}
+	}
+	// If we got here, that means that the wrapped error chain does not have
+	// any special formatting below it. So we want to return the topmost non-special
+	// error (which is 'err')
+
+	// Default just printing the error. Use +v for verbose to handle stack
+	// traces of xerrors.
+	if opts.Verbose {
+		return pretty.Sprint(headLineStyle(), fmt.Sprintf("%+v", err)), false
+	}
+
+	return pretty.Sprint(headLineStyle(), fmt.Sprintf("%v", err)), false
 }
 
-func (p *prettyErrorFormatter) printf(style lipgloss.Style, format string, a ...interface{}) {
-	s := style.Render(fmt.Sprintf(format, a...))
-	_, _ = p.w.Write(
-		[]byte(
-			s,
-		),
+// formatMultiError formats a multi-error. It formats it as a list of errors.
+//
+//	Multiple Errors:
+//	<# errors encountered>:
+//		1. <heading error message>
+//		   <verbose error message>
+//		2. <heading error message>
+//		   <verbose error message>
+func formatMultiError(from string, multi []error, opts *formatOpts) string {
+	var errorStrings []string
+	for _, err := range multi {
+		msg, _ := cliHumanFormatError("", err, opts)
+		errorStrings = append(errorStrings, msg)
+	}
+
+	// Write errors out
+	var str strings.Builder
+	var traceMsg string
+	if from != "" {
+		traceMsg = fmt.Sprintf("Trace=[%s])", from)
+	}
+	_, _ = str.WriteString(pretty.Sprint(headLineStyle(), fmt.Sprintf("%d errors encountered: %s", len(multi), traceMsg)))
+	for i, errStr := range errorStrings {
+		// Indent each error
+		errStr = strings.ReplaceAll(errStr, "\n", "\n"+indent)
+		// Error now looks like
+		// |  <line>
+		// |  <line>
+		prefix := fmt.Sprintf("%d. ", i+1)
+		if len(prefix) < len(indent) {
+			// Indent the prefix to match the indent
+			prefix += strings.Repeat(" ", len(indent)-len(prefix))
+		}
+		errStr = prefix + errStr
+		// Now looks like
+		// |1.<line>
+		// |  <line>
+		_, _ = str.WriteString("\n" + errStr)
+	}
+	return str.String()
+}
+
+// formatRunCommandError are cli command errors. This kind of error is very
+// broad, as it contains all errors that occur when running a command.
+// If you know the error is something else, like a codersdk.Error, make a new
+// formatter and add it to cliHumanFormatError function.
+func formatRunCommandError(err *serpent.RunCommandError, opts *formatOpts) string {
+	var str strings.Builder
+	_, _ = str.WriteString(pretty.Sprint(headLineStyle(),
+		fmt.Sprintf(
+			`Encountered an error running %q, see "%s --help" for more information`,
+			err.Cmd.FullName(), err.Cmd.FullName())))
+	_, _ = str.WriteString(pretty.Sprint(headLineStyle(), "\nerror: "))
+
+	msgString, special := cliHumanFormatError("", err.Err, opts)
+	if special {
+		_, _ = str.WriteString(msgString)
+	} else {
+		_, _ = str.WriteString(pretty.Sprint(tailLineStyle(), msgString))
+	}
+
+	return str.String()
+}
+
+// formatCoderSDKError come from API requests. In verbose mode, add the
+// request debug information.
+func formatCoderSDKError(from string, err *codersdk.Error, opts *formatOpts) string {
+	var str strings.Builder
+	if opts.Verbose {
+		// If all these fields are empty, then do not print this information.
+		// This can occur if the error is being used outside the api.
+		if !(err.Method() == "" && err.URL() == "" && err.StatusCode() == 0) {
+			_, _ = str.WriteString(pretty.Sprint(headLineStyle(), fmt.Sprintf("API request error to \"%s:%s\". Status code %d", err.Method(), err.URL(), err.StatusCode())))
+			_, _ = str.WriteString("\n")
+		}
+	}
+	// Always include this trace. Users can ignore this.
+	if from != "" {
+		_, _ = str.WriteString(pretty.Sprint(headLineStyle(), fmt.Sprintf("Trace=[%s]", from)))
+		_, _ = str.WriteString("\n")
+	}
+
+	// The main error message
+	_, _ = str.WriteString(pretty.Sprint(headLineStyle(), err.Message))
+
+	// Validation errors.
+	if len(err.Validations) > 0 {
+		_, _ = str.WriteString("\n")
+		_, _ = str.WriteString(pretty.Sprint(tailLineStyle(), fmt.Sprintf("%d validation error(s) found", len(err.Validations))))
+		for _, e := range err.Validations {
+			_, _ = str.WriteString("\n\t")
+			_, _ = str.WriteString(pretty.Sprint(cliui.DefaultStyles.Field, e.Field))
+			_, _ = str.WriteString(pretty.Sprintf(cliui.DefaultStyles.Warn, ": %s", e.Detail))
+		}
+	}
+
+	if err.Helper != "" {
+		_, _ = str.WriteString("\n")
+		_, _ = str.WriteString(pretty.Sprintf(tailLineStyle(), "Suggestion: %s", err.Helper))
+	}
+	// By default we do not show the Detail with the helper.
+	if opts.Verbose || (err.Helper == "" && err.Detail != "") {
+		_, _ = str.WriteString("\n")
+		_, _ = str.WriteString(pretty.Sprint(tailLineStyle(), err.Detail))
+	}
+	return str.String()
+}
+
+// traceError is a helper function that aides developers debugging failed cli
+// commands. When we pretty print errors, we lose the context in which they came.
+// This function adds the context back. Unfortunately there is no easy way to get
+// the prefix to: "error string: %w", so we do a bit of string manipulation.
+//
+//nolint:errorlint
+func traceError(err error) string {
+	if uw, ok := err.(interface{ Unwrap() error }); ok {
+		var a, b string
+		if err != nil {
+			a = err.Error()
+		}
+		if uw != nil {
+			uwerr := uw.Unwrap()
+			if uwerr != nil {
+				b = uwerr.Error()
+			}
+		}
+		c := strings.TrimSuffix(a, b)
+		return c
+	}
+	return err.Error()
+}
+
+// These styles are arbitrary.
+func headLineStyle() pretty.Style {
+	return cliui.DefaultStyles.Error
+}
+
+func tailLineStyle() pretty.Style {
+	return pretty.Style{pretty.Nop}
+}
+
+//nolint:unused
+func SlimUnsupported(w io.Writer, cmd string) {
+	_, _ = fmt.Fprintf(w, "You are using a 'slim' build of Coder, which does not support the %s subcommand.\n", pretty.Sprint(cliui.DefaultStyles.Code, cmd))
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "Please use a build of Coder from GitHub releases:")
+	_, _ = fmt.Fprintln(w, "  https://github.com/coder/coder/releases")
+
+	//nolint:revive
+	os.Exit(1)
+}
+
+func defaultUpgradeMessage(version string) string {
+	// Our installation script doesn't work on Windows, so instead we direct the user
+	// to the GitHub release page to download the latest installer.
+	version = strings.TrimPrefix(version, "v")
+	if runtime.GOOS == "windows" {
+		return fmt.Sprintf("download the server version from: https://github.com/coder/coder/releases/v%s", version)
+	}
+	return fmt.Sprintf("download the server version with: 'curl -L https://coder.com/install.sh | sh -s -- --version %s'", version)
+}
+
+// wrapTransportWithEntitlementsCheck adds a middleware to the HTTP transport
+// that checks for entitlement warnings and prints them to the user.
+func wrapTransportWithEntitlementsCheck(rt http.RoundTripper, w io.Writer) http.RoundTripper {
+	var once sync.Once
+	return roundTripper(func(req *http.Request) (*http.Response, error) {
+		res, err := rt.RoundTrip(req)
+		if err != nil {
+			return res, err
+		}
+		once.Do(func() {
+			for _, warning := range res.Header.Values(codersdk.EntitlementsWarningHeader) {
+				_, _ = fmt.Fprintln(w, pretty.Sprint(cliui.DefaultStyles.Warn, warning))
+			}
+		})
+		return res, err
+	})
+}
+
+// wrapTransportWithVersionMismatchCheck adds a middleware to the HTTP transport
+// that checks for version mismatches between the client and server. If a mismatch
+// is detected, a warning is printed to the user.
+func wrapTransportWithVersionMismatchCheck(rt http.RoundTripper, inv *serpent.Invocation, clientVersion string, getBuildInfo func(ctx context.Context) (codersdk.BuildInfoResponse, error)) http.RoundTripper {
+	var once sync.Once
+	return roundTripper(func(req *http.Request) (*http.Response, error) {
+		res, err := rt.RoundTrip(req)
+		if err != nil {
+			return res, err
+		}
+		once.Do(func() {
+			serverVersion := res.Header.Get(codersdk.BuildVersionHeader)
+			if serverVersion == "" {
+				return
+			}
+			if buildinfo.VersionsMatch(clientVersion, serverVersion) {
+				return
+			}
+			upgradeMessage := defaultUpgradeMessage(semver.Canonical(serverVersion))
+			if serverInfo, err := getBuildInfo(inv.Context()); err == nil {
+				switch {
+				case serverInfo.UpgradeMessage != "":
+					upgradeMessage = serverInfo.UpgradeMessage
+				// The site-local `install.sh` was introduced in v2.19.0
+				case serverInfo.DashboardURL != "" && semver.Compare(semver.MajorMinor(serverVersion), "v2.19") >= 0:
+					upgradeMessage = fmt.Sprintf("download %s with: 'curl -fsSL %s/install.sh | sh'", serverVersion, serverInfo.DashboardURL)
+				}
+			}
+			fmtWarningText := "version mismatch: client %s, server %s\n%s"
+			fmtWarn := pretty.Sprint(cliui.DefaultStyles.Warn, fmtWarningText)
+			warning := fmt.Sprintf(fmtWarn, clientVersion, serverVersion, upgradeMessage)
+
+			_, _ = fmt.Fprintln(inv.Stderr, warning)
+		})
+		return res, err
+	})
+}
+
+// wrapTransportWithTelemetryHeader adds telemetry headers to report command usage
+// to an HTTP transport.
+func wrapTransportWithTelemetryHeader(transport http.RoundTripper, inv *serpent.Invocation) http.RoundTripper {
+	var (
+		value string
+		once  sync.Once
 	)
+	return roundTripper(func(req *http.Request) (*http.Response, error) {
+		once.Do(func() {
+			// We only want to compute this header once when a request
+			// first goes out, hence the complexity with locking here.
+			var topts []telemetry.Option
+			for _, opt := range inv.Command.FullOptions() {
+				if opt.ValueSource == serpent.ValueSourceNone || opt.ValueSource == serpent.ValueSourceDefault {
+					continue
+				}
+				topts = append(topts, telemetry.Option{
+					Name:        opt.Name,
+					ValueSource: string(opt.ValueSource),
+				})
+			}
+			ti := telemetry.Invocation{
+				Command:   inv.Command.FullName(),
+				Options:   topts,
+				InvokedAt: time.Now(),
+			}
+
+			byt, err := json.Marshal(ti)
+			if err != nil {
+				// Should be impossible
+				panic(err)
+			}
+			s := base64.StdEncoding.EncodeToString(byt)
+			// Don't send the header if it's too long!
+			if len(s) <= 4096 {
+				value = s
+			}
+		})
+		if value != "" {
+			req.Header.Add(codersdk.CLITelemetryHeader, value)
+		}
+		return transport.RoundTrip(req)
+	})
+}
+
+type roundTripper func(req *http.Request) (*http.Response, error)
+
+func (r roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return r(req)
+}
+
+// HeaderTransport creates a new transport that executes `--header-command`
+// if it is set to add headers for all outbound requests.
+func headerTransport(ctx context.Context, serverURL *url.URL, header []string, headerCommand string) (*codersdk.HeaderTransport, error) {
+	transport := &codersdk.HeaderTransport{
+		Transport: http.DefaultTransport,
+		Header:    http.Header{},
+	}
+	headers := header
+	if headerCommand != "" {
+		shell := "sh"
+		caller := "-c"
+		if runtime.GOOS == "windows" {
+			shell = "cmd.exe"
+			caller = "/c"
+		}
+		var outBuf bytes.Buffer
+		// #nosec
+		cmd := exec.CommandContext(ctx, shell, caller, headerCommand)
+		cmd.Env = append(os.Environ(), "CODER_URL="+serverURL.String())
+		cmd.Stdout = &outBuf
+		cmd.Stderr = io.Discard
+		err := cmd.Run()
+		if err != nil {
+			return nil, xerrors.Errorf("failed to run %v: %w", cmd.Args, err)
+		}
+		scanner := bufio.NewScanner(&outBuf)
+		for scanner.Scan() {
+			headers = append(headers, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, xerrors.Errorf("scan %v: %w", cmd.Args, err)
+		}
+	}
+	for _, header := range headers {
+		parts := strings.SplitN(header, "=", 2)
+		if len(parts) < 2 {
+			return nil, xerrors.Errorf("split header %q had less than two parts", header)
+		}
+		transport.Header.Add(parts[0], parts[1])
+	}
+	return transport, nil
+}
+
+// printDeprecatedOptions loops through all command options, and prints
+// a warning for usage of deprecated options.
+func PrintDeprecatedOptions() serpent.MiddlewareFunc {
+	return func(next serpent.HandlerFunc) serpent.HandlerFunc {
+		return func(inv *serpent.Invocation) error {
+			opts := inv.Command.Options
+			// Print deprecation warnings.
+			for _, opt := range opts {
+				if opt.UseInstead == nil {
+					continue
+				}
+
+				if opt.ValueSource == serpent.ValueSourceNone || opt.ValueSource == serpent.ValueSourceDefault {
+					continue
+				}
+
+				var warnStr strings.Builder
+				_, _ = warnStr.WriteString(translateSource(opt.ValueSource, opt))
+				_, _ = warnStr.WriteString(" is deprecated, please use ")
+				for i, use := range opt.UseInstead {
+					_, _ = warnStr.WriteString(translateSource(opt.ValueSource, use))
+					if i != len(opt.UseInstead)-1 {
+						_, _ = warnStr.WriteString(" and ")
+					}
+				}
+				_, _ = warnStr.WriteString(" instead.\n")
+
+				cliui.Warn(inv.Stderr,
+					warnStr.String(),
+				)
+			}
+
+			return next(inv)
+		}
+	}
+}
+
+// translateSource provides the name of the source of the option, depending on the
+// supplied target ValueSource.
+func translateSource(target serpent.ValueSource, opt serpent.Option) string {
+	switch target {
+	case serpent.ValueSourceFlag:
+		return fmt.Sprintf("`--%s`", opt.Flag)
+	case serpent.ValueSourceEnv:
+		return fmt.Sprintf("`%s`", opt.Env)
+	case serpent.ValueSourceYAML:
+		return fmt.Sprintf("`%s`", fullYamlName(opt))
+	default:
+		return opt.Name
+	}
+}
+
+func fullYamlName(opt serpent.Option) string {
+	var full strings.Builder
+	for _, name := range opt.Group.Ancestry() {
+		_, _ = full.WriteString(name.YAML)
+		_, _ = full.WriteString(".")
+	}
+	_, _ = full.WriteString(opt.YAML)
+	return full.String()
 }

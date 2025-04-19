@@ -1,88 +1,83 @@
-import { makeStyles } from "@mui/styles"
-import { ComponentProps, FC, PropsWithChildren } from "react"
-import { combineClasses } from "utils/combineClasses"
+import type { CSSObject, Interpolation, Theme } from "@emotion/react";
+import type { FC, HTMLAttributes, ReactNode } from "react";
 
-export const Stats: FC<ComponentProps<"div">> = (props) => {
-  const styles = useStyles()
-  return (
-    <div
-      {...props}
-      className={combineClasses([styles.stats, props.className])}
-    />
-  )
+export const Stats: FC<HTMLAttributes<HTMLDivElement>> = ({
+	children,
+	...attrs
+}) => {
+	return (
+		<div css={styles.stats} {...attrs}>
+			{children}
+		</div>
+	);
+};
+
+interface StatsItemProps extends HTMLAttributes<HTMLDivElement> {
+	label: string;
+	value: ReactNode;
 }
 
-export const StatsItem: FC<
-  {
-    label: string
-    value: string | number | JSX.Element
-  } & ComponentProps<"div">
-> = ({ label, value, ...divProps }) => {
-  const styles = useStyles()
+export const StatsItem: FC<StatsItemProps> = ({ label, value, ...attrs }) => {
+	return (
+		<div css={styles.statItem} {...attrs}>
+			<span css={styles.statsLabel}>{label}:</span>
+			<span css={styles.statsValue}>{value}</span>
+		</div>
+	);
+};
 
-  return (
-    <div
-      {...divProps}
-      className={combineClasses([styles.statItem, divProps.className])}
-    >
-      <span className={styles.statsLabel}>{label}:</span>
-      <span className={styles.statsValue}>{value}</span>
-    </div>
-  )
-}
+const styles = {
+	stats: (theme) => ({
+		...(theme.typography.body2 as CSSObject),
+		paddingLeft: 16,
+		paddingRight: 16,
+		borderRadius: 8,
+		border: `1px solid ${theme.palette.divider}`,
+		display: "flex",
+		alignItems: "center",
+		color: theme.palette.text.secondary,
+		margin: "0px",
+		flexWrap: "wrap",
 
-const useStyles = makeStyles((theme) => ({
-  stats: {
-    ...theme.typography.body2,
-    paddingLeft: theme.spacing(2),
-    paddingRight: theme.spacing(2),
-    borderRadius: theme.shape.borderRadius,
-    border: `1px solid ${theme.palette.divider}`,
-    display: "flex",
-    alignItems: "center",
-    color: theme.palette.text.secondary,
-    margin: "0px",
-    flexWrap: "wrap",
+		[theme.breakpoints.down("md")]: {
+			display: "block",
+			padding: 16,
+		},
+	}),
 
-    [theme.breakpoints.down("md")]: {
-      display: "block",
-      padding: theme.spacing(2),
-    },
-  },
+	statItem: (theme) => ({
+		padding: 14,
+		paddingLeft: 16,
+		paddingRight: 16,
+		display: "flex",
+		alignItems: "baseline",
+		gap: 8,
 
-  statItem: {
-    padding: theme.spacing(1.75),
-    paddingLeft: theme.spacing(2),
-    paddingRight: theme.spacing(2),
-    display: "flex",
-    alignItems: "baseline",
-    gap: theme.spacing(1),
+		[theme.breakpoints.down("md")]: {
+			padding: 8,
+		},
+	}),
 
-    [theme.breakpoints.down("md")]: {
-      padding: theme.spacing(1),
-    },
-  },
+	statsLabel: {
+		display: "block",
+		wordWrap: "break-word",
+	},
 
-  statsLabel: {
-    display: "block",
-    wordWrap: "break-word",
-  },
+	statsValue: (theme) => ({
+		marginTop: 2,
+		display: "flex",
+		wordWrap: "break-word",
+		color: theme.palette.text.primary,
+		alignItems: "center",
 
-  statsValue: {
-    marginTop: theme.spacing(0.25),
-    display: "flex",
-    wordWrap: "break-word",
-    color: theme.palette.text.primary,
-    alignItems: "center",
+		"& a": {
+			color: theme.palette.text.primary,
+			textDecoration: "none",
+			fontWeight: 600,
 
-    "& a": {
-      color: theme.palette.text.primary,
-      textDecoration: "none",
-      fontWeight: 600,
-
-      "&:hover": {
-        textDecoration: "underline",
-      },
-    },
-  },
-}))
+			"&:hover": {
+				textDecoration: "underline",
+			},
+		},
+	}),
+} satisfies Record<string, Interpolation<Theme>>;

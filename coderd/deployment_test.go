@@ -4,10 +4,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/coderd/coderdtest"
-	"github.com/coder/coder/testutil"
+	"github.com/coder/coder/v2/coderd/coderdtest"
+	"github.com/coder/coder/v2/testutil"
 )
 
 func TestDeploymentValues(t *testing.T) {
@@ -25,6 +26,8 @@ func TestDeploymentValues(t *testing.T) {
 	cfg.OIDC.EmailField.Set("some_random_field_you_never_expected")
 	cfg.PostgresURL.Set(hi)
 	cfg.SCIMAPIKey.Set(hi)
+	cfg.ExternalTokenEncryptionKeys.Set("the_random_key_we_never_expected,an_other_key_we_never_unexpected")
+	cfg.Provisioner.DaemonPSK = "provisionersftw"
 
 	client := coderdtest.New(t, &coderdtest.Options{
 		DeploymentValues: cfg,
@@ -43,14 +46,19 @@ func TestDeploymentValues(t *testing.T) {
 	require.Empty(t, scrubbed.Values.OIDC.ClientSecret.Value())
 	require.Empty(t, scrubbed.Values.PostgresURL.Value())
 	require.Empty(t, scrubbed.Values.SCIMAPIKey.Value())
+	require.Empty(t, scrubbed.Values.ExternalTokenEncryptionKeys.Value())
+	require.Empty(t, scrubbed.Values.Provisioner.DaemonPSK.Value())
 }
 
 func TestDeploymentStats(t *testing.T) {
 	t.Parallel()
+	t.Log("This test is time-sensitive. It may fail if the deployment is not ready in time.")
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 	defer cancel()
 	client := coderdtest.New(t, &coderdtest.Options{})
 	_ = coderdtest.CreateFirstUser(t, client)
-	_, err := client.DeploymentStats(ctx)
-	require.NoError(t, err)
+	assert.True(t, testutil.Eventually(ctx, t, func(tctx context.Context) bool {
+		_, err := client.DeploymentStats(tctx)
+		return err == nil
+	}, testutil.IntervalMedium), "failed to get deployment stats in time")
 }

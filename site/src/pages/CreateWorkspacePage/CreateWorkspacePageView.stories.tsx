@@ -1,190 +1,300 @@
-import { ComponentMeta, Story } from "@storybook/react"
+import { action } from "@storybook/addon-actions";
+import type { Meta, StoryObj } from "@storybook/react";
+import { within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { chromatic } from "testHelpers/chromatic";
 import {
-  mockApiError,
-  mockParameterSchema,
-  MockParameterSchemas,
-  MockTemplate,
-  MockTemplateVersionParameter1,
-  MockTemplateVersionParameter2,
-  MockTemplateVersionParameter3,
-} from "../../testHelpers/entities"
-import {
-  CreateWorkspaceErrors,
-  CreateWorkspacePageView,
-  CreateWorkspacePageViewProps,
-} from "./CreateWorkspacePageView"
+	MockTemplate,
+	MockTemplateVersionParameter1,
+	MockTemplateVersionParameter2,
+	MockTemplateVersionParameter3,
+	MockUser,
+	mockApiError,
+} from "testHelpers/entities";
+import { CreateWorkspacePageView } from "./CreateWorkspacePageView";
 
-export default {
-  title: "pages/CreateWorkspacePageView",
-  component: CreateWorkspacePageView,
-} as ComponentMeta<typeof CreateWorkspacePageView>
+const meta: Meta<typeof CreateWorkspacePageView> = {
+	title: "pages/CreateWorkspacePage",
+	parameters: { chromatic },
+	component: CreateWorkspacePageView,
+	args: {
+		defaultName: "",
+		defaultOwner: MockUser,
+		autofillParameters: [],
+		template: MockTemplate,
+		parameters: [],
+		externalAuth: [],
+		hasAllRequiredExternalAuth: true,
+		mode: "form",
+		permissions: {
+			createWorkspaceForAny: true,
+		},
+		onCancel: action("onCancel"),
+	},
+};
 
-const Template: Story<CreateWorkspacePageViewProps> = (args) => (
-  <CreateWorkspacePageView {...args} />
-)
+export default meta;
+type Story = StoryObj<typeof CreateWorkspacePageView>;
 
-export const NoParameters = Template.bind({})
-NoParameters.args = {
-  templates: [MockTemplate],
-  selectedTemplate: MockTemplate,
-  templateSchema: [],
-  createWorkspaceErrors: {},
-}
+export const NoParameters: Story = {};
 
-export const Parameters = Template.bind({})
-Parameters.args = {
-  templates: [MockTemplate],
-  selectedTemplate: MockTemplate,
-  templateSchema: MockParameterSchemas,
-  createWorkspaceErrors: {},
-}
+export const CreateWorkspaceError: Story = {
+	args: {
+		error: mockApiError({
+			message:
+				'Workspace "test" already exists in the "docker-amd64" template.',
+			validations: [
+				{
+					field: "name",
+					detail: "This value is already in use and should be unique.",
+				},
+			],
+		}),
+	},
+};
 
-export const RedisplayParameters = Template.bind({})
-RedisplayParameters.args = {
-  templates: [MockTemplate],
-  selectedTemplate: MockTemplate,
-  templateSchema: [
-    mockParameterSchema({
-      name: "region",
-      default_source_value: "🏈 US Central",
-      description: "Where would you like your workspace to live?",
-      redisplay_value: false,
-      validation_contains: [
-        "🏈 US Central",
-        "⚽ Brazil East",
-        "💶 EU West",
-        "🦘 Australia South",
-      ],
-    }),
-    mockParameterSchema({
-      name: "instance_size",
-      default_source_value: "Big",
-      description: "How large should you instance be?",
-      validation_contains: ["Small", "Medium", "Big"],
-      redisplay_value: false,
-    }),
-    mockParameterSchema({
-      name: "instance_size",
-      default_source_value: "Big",
-      description: "How large should your instance be?",
-      validation_contains: ["Small", "Medium", "Big"],
-      redisplay_value: true,
-    }),
-    mockParameterSchema({
-      name: "disable_docker",
-      description: "Disable Docker?",
-      validation_value_type: "bool",
-      default_source_value: "false",
-      redisplay_value: true,
-    }),
-  ],
-  createWorkspaceErrors: {},
-}
+export const SpecificVersion: Story = {
+	args: {
+		versionId: "specific-version",
+	},
+};
 
-export const GetTemplatesError = Template.bind({})
-GetTemplatesError.args = {
-  ...Parameters.args,
-  createWorkspaceErrors: {
-    [CreateWorkspaceErrors.GET_TEMPLATES_ERROR]: mockApiError({
-      message: "Failed to fetch templates.",
-      detail: "You do not have permission to access this resource.",
-    }),
-  },
-  hasTemplateErrors: true,
-}
+export const Duplicate: Story = {
+	args: {
+		mode: "duplicate",
+	},
+};
 
-export const GetTemplateSchemaError = Template.bind({})
-GetTemplateSchemaError.args = {
-  ...Parameters.args,
-  createWorkspaceErrors: {
-    [CreateWorkspaceErrors.GET_TEMPLATE_SCHEMA_ERROR]: mockApiError({
-      message: 'Failed to fetch template schema for "docker-amd64".',
-      detail: "You do not have permission to access this resource.",
-    }),
-  },
-  hasTemplateErrors: true,
-}
+export const Parameters: Story = {
+	args: {
+		parameters: [
+			MockTemplateVersionParameter1,
+			MockTemplateVersionParameter2,
+			MockTemplateVersionParameter3,
+			{
+				name: "Region",
+				required: false,
+				description: "",
+				description_plaintext: "",
+				type: "string",
+				mutable: false,
+				default_value: "",
+				icon: "/emojis/1f30e.png",
+				options: [
+					{
+						name: "Pittsburgh",
+						description: "",
+						value: "us-pittsburgh",
+						icon: "/emojis/1f1fa-1f1f8.png",
+					},
+					{
+						name: "Helsinki",
+						description: "",
+						value: "eu-helsinki",
+						icon: "/emojis/1f1eb-1f1ee.png",
+					},
+					{
+						name: "Sydney",
+						description: "",
+						value: "ap-sydney",
+						icon: "/emojis/1f1e6-1f1fa.png",
+					},
+				],
+				ephemeral: false,
+			},
+		],
+		autofillParameters: [
+			{
+				name: "first_parameter",
+				value: "Cool suggestion",
+				source: "user_history",
+			},
+			{
+				name: "third_parameter",
+				value: "aaaa",
+				source: "url",
+			},
+		],
+	},
+};
 
-export const CreateWorkspaceError = Template.bind({})
-CreateWorkspaceError.args = {
-  ...Parameters.args,
-  createWorkspaceErrors: {
-    [CreateWorkspaceErrors.CREATE_WORKSPACE_ERROR]: mockApiError({
-      message:
-        'Workspace "test" already exists in the "docker-amd64" template.',
-      validations: [
-        {
-          field: "name",
-          detail: "This value is already in use and should be unique.",
-        },
-      ],
-    }),
-  },
-  initialTouched: {
-    name: true,
-  },
-}
+export const PresetsButNoneSelected: Story = {
+	args: {
+		presets: [
+			{
+				ID: "preset-1",
+				Name: "Preset 1",
+				Parameters: [
+					{
+						Name: MockTemplateVersionParameter1.name,
+						Value: "preset 1 override",
+					},
+				],
+			},
+			{
+				ID: "preset-2",
+				Name: "Preset 2",
+				Parameters: [
+					{
+						Name: MockTemplateVersionParameter2.name,
+						Value: "42",
+					},
+				],
+			},
+		],
+		parameters: [
+			MockTemplateVersionParameter1,
+			MockTemplateVersionParameter2,
+			MockTemplateVersionParameter3,
+		],
+	},
+};
 
-export const RichParameters = Template.bind({})
-RichParameters.args = {
-  templates: [MockTemplate],
-  selectedTemplate: MockTemplate,
-  templateParameters: [
-    MockTemplateVersionParameter1,
-    MockTemplateVersionParameter2,
-    MockTemplateVersionParameter3,
-    {
-      name: "Region",
-      required: false,
-      description: "",
-      description_plaintext: "",
-      type: "string",
-      mutable: false,
-      default_value: "",
-      icon: "/emojis/1f30e.png",
-      options: [
-        {
-          name: "Pittsburgh",
-          description: "",
-          value: "us-pittsburgh",
-          icon: "/emojis/1f1fa-1f1f8.png",
-        },
-        {
-          name: "Helsinki",
-          description: "",
-          value: "eu-helsinki",
-          icon: "/emojis/1f1eb-1f1ee.png",
-        },
-        {
-          name: "Sydney",
-          description: "",
-          value: "ap-sydney",
-          icon: "/emojis/1f1e6-1f1fa.png",
-        },
-      ],
-    },
-  ],
-  createWorkspaceErrors: {},
-}
+export const PresetSelected: Story = {
+	args: PresetsButNoneSelected.args,
+	play: async ({ canvasElement }) => {
+		const canvas = within(canvasElement);
+		await userEvent.click(canvas.getByLabelText("Preset"));
+		await userEvent.click(canvas.getByText("Preset 1"));
+	},
+};
 
-export const GitAuth = Template.bind({})
-GitAuth.args = {
-  templates: [MockTemplate],
-  selectedTemplate: MockTemplate,
-  createWorkspaceErrors: {},
-  templateParameters: [],
-  templateGitAuth: [
-    {
-      id: "github",
-      type: "github",
-      authenticated: false,
-      authenticate_url: "",
-    },
-    {
-      id: "gitlab",
-      type: "gitlab",
-      authenticated: true,
-      authenticate_url: "",
-    },
-  ],
-}
+export const PresetSelectedWithHiddenParameters: Story = {
+	args: PresetsButNoneSelected.args,
+	play: async ({ canvasElement }) => {
+		const canvas = within(canvasElement);
+		// Select a preset
+		await userEvent.click(canvas.getByLabelText("Preset"));
+		await userEvent.click(canvas.getByText("Preset 1"));
+	},
+};
+
+export const PresetSelectedWithVisibleParameters: Story = {
+	args: PresetsButNoneSelected.args,
+	play: async ({ canvasElement }) => {
+		const canvas = within(canvasElement);
+		// Select a preset
+		await userEvent.click(canvas.getByLabelText("Preset"));
+		await userEvent.click(canvas.getByText("Preset 1"));
+		// Toggle off the show preset parameters switch
+		await userEvent.click(canvas.getByLabelText("Show preset parameters"));
+	},
+};
+
+export const PresetReselected: Story = {
+	args: PresetsButNoneSelected.args,
+	play: async ({ canvasElement }) => {
+		const canvas = within(canvasElement);
+
+		// First selection of Preset 1
+		await userEvent.click(canvas.getByLabelText("Preset"));
+		await userEvent.click(
+			canvas.getByText("Preset 1", { selector: ".MuiMenuItem-root" }),
+		);
+
+		// Reselect the same preset
+		await userEvent.click(canvas.getByLabelText("Preset"));
+		await userEvent.click(
+			canvas.getByText("Preset 1", { selector: ".MuiMenuItem-root" }),
+		);
+	},
+};
+
+export const ExternalAuth: Story = {
+	args: {
+		externalAuth: [
+			{
+				id: "github",
+				type: "github",
+				authenticated: false,
+				authenticate_url: "",
+				display_icon: "/icon/github.svg",
+				display_name: "GitHub",
+			},
+			{
+				id: "gitlab",
+				type: "gitlab",
+				authenticated: true,
+				authenticate_url: "",
+				display_icon: "/icon/gitlab.svg",
+				display_name: "GitLab",
+				optional: true,
+			},
+		],
+		hasAllRequiredExternalAuth: false,
+	},
+};
+
+export const ExternalAuthError: Story = {
+	args: {
+		error: true,
+		externalAuth: [
+			{
+				id: "github",
+				type: "github",
+				authenticated: false,
+				authenticate_url: "",
+				display_icon: "/icon/github.svg",
+				display_name: "GitHub",
+			},
+			{
+				id: "gitlab",
+				type: "gitlab",
+				authenticated: false,
+				authenticate_url: "",
+				display_icon: "/icon/gitlab.svg",
+				display_name: "GitLab",
+				optional: true,
+			},
+		],
+		hasAllRequiredExternalAuth: false,
+	},
+};
+
+export const ExternalAuthAllRequiredConnected: Story = {
+	args: {
+		externalAuth: [
+			{
+				id: "github",
+				type: "github",
+				authenticated: true,
+				authenticate_url: "",
+				display_icon: "/icon/github.svg",
+				display_name: "GitHub",
+			},
+			{
+				id: "gitlab",
+				type: "gitlab",
+				authenticated: false,
+				authenticate_url: "",
+				display_icon: "/icon/gitlab.svg",
+				display_name: "GitLab",
+				optional: true,
+			},
+		],
+	},
+};
+
+export const ExternalAuthAllConnected: Story = {
+	args: {
+		externalAuth: [
+			{
+				id: "github",
+				type: "github",
+				authenticated: true,
+				authenticate_url: "",
+				display_icon: "/icon/github.svg",
+				display_name: "GitHub",
+			},
+			{
+				id: "gitlab",
+				type: "gitlab",
+				authenticated: true,
+				authenticate_url: "",
+				display_icon: "/icon/gitlab.svg",
+				display_name: "GitLab",
+				optional: true,
+			},
+		],
+	},
+};

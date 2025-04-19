@@ -1,100 +1,82 @@
-import { makeStyles } from "@mui/styles"
-import { Sidebar } from "./Sidebar"
-import { Stack } from "components/Stack/Stack"
-import { createContext, FC, Suspense, useContext } from "react"
-import { Helmet } from "react-helmet-async"
-import { pageTitle } from "../../utils/page"
-import { Loader } from "components/Loader/Loader"
-import { Outlet, useParams } from "react-router-dom"
-import { Margins } from "components/Margins/Margins"
-import { checkAuthorization, getTemplateByName } from "api/api"
-import { useQuery } from "@tanstack/react-query"
-import { useOrganizationId } from "hooks/useOrganizationId"
+import { checkAuthorization } from "api/queries/authCheck";
+import { templateByName } from "api/queries/templates";
+import type { AuthorizationResponse, Template } from "api/typesGenerated";
+import { ErrorAlert } from "components/Alert/ErrorAlert";
+import { Loader } from "components/Loader/Loader";
+import { Margins } from "components/Margins/Margins";
+import { Stack } from "components/Stack/Stack";
+import { type FC, Suspense, createContext, useContext } from "react";
+import { Helmet } from "react-helmet-async";
+import { useQuery } from "react-query";
+import { Outlet, useParams } from "react-router-dom";
+import { pageTitle } from "utils/page";
+import { Sidebar } from "./Sidebar";
 
-const templatePermissions = (templateId: string) =>
-  ({
-    canUpdateTemplate: {
-      object: {
-        resource_type: "template",
-        resource_id: templateId,
-      },
-      action: "update",
-    },
-  } as const)
+const TemplateSettings = createContext<
+	{ template: Template; permissions: AuthorizationResponse } | undefined
+>(undefined);
 
-const fetchTemplateSettings = async (orgId: string, name: string) => {
-  const template = await getTemplateByName(orgId, name)
-  const permissions = await checkAuthorization({
-    checks: templatePermissions(template.id),
-  })
+export function useTemplateSettings() {
+	const value = useContext(TemplateSettings);
+	if (!value) {
+		throw new Error("This hook can only be used from a template settings page");
+	}
 
-  return {
-    template,
-    permissions,
-  }
-}
-
-const useTemplate = (orgId: string, name: string) => {
-  return useQuery({
-    queryKey: ["template", name, "settings"],
-    queryFn: () => fetchTemplateSettings(orgId, name),
-  })
-}
-
-const TemplateSettingsContext = createContext<
-  Awaited<ReturnType<typeof fetchTemplateSettings>> | undefined
->(undefined)
-
-export const useTemplateSettingsContext = () => {
-  const context = useContext(TemplateSettingsContext)
-
-  if (!context) {
-    throw new Error(
-      "useTemplateSettingsContext must be used within a TemplateSettingsContext.Provider",
-    )
-  }
-
-  return context
+	return value;
 }
 
 export const TemplateSettingsLayout: FC = () => {
-  const styles = useStyles()
-  const orgId = useOrganizationId()
-  const { template: templateName } = useParams() as { template: string }
-  const { data: settings } = useTemplate(orgId, templateName)
+	const { organization: organizationName = "default", template: templateName } =
+		useParams() as { organization?: string; template: string };
+	const templateQuery = useQuery(
+		templateByName(organizationName, templateName),
+	);
+	const permissionsQuery = useQuery({
+		...checkAuthorization({
+			checks: {
+				canUpdateTemplate: {
+					object: {
+						resource_type: "template",
+						resource_id: templateQuery.data?.id ?? "",
+					},
+					action: "update",
+				},
+			},
+		}),
+		enabled: templateQuery.isSuccess,
+	});
 
-  return (
-    <>
-      <Helmet>
-        <title>{pageTitle([templateName, "Settings"])}</title>
-      </Helmet>
+	if (templateQuery.isLoading || permissionsQuery.isLoading) {
+		return <Loader />;
+	}
 
-      {settings ? (
-        <TemplateSettingsContext.Provider value={settings}>
-          <Margins>
-            <Stack className={styles.wrapper} direction="row" spacing={10}>
-              <Sidebar template={settings.template} />
-              <Suspense fallback={<Loader />}>
-                <main className={styles.content}>
-                  <Outlet />
-                </main>
-              </Suspense>
-            </Stack>
-          </Margins>
-        </TemplateSettingsContext.Provider>
-      ) : (
-        <Loader />
-      )}
-    </>
-  )
-}
+	return (
+		<>
+			<Helmet>
+				<title>{pageTitle(templateName, "Settings")}</title>
+			</Helmet>
 
-const useStyles = makeStyles((theme) => ({
-  wrapper: {
-    padding: theme.spacing(6, 0),
-  },
-
-  content: {
-    width: "100%",
-  },
-}))
+			<Margins>
+				<Stack css={{ padding: "48px 0" }} direction="row" spacing={10}>
+					{templateQuery.isError || permissionsQuery.isError ? (
+						<ErrorAlert error={templateQuery.error} />
+					) : (
+						<TemplateSettings.Provider
+							value={{
+								template: templateQuery.data,
+								permissions: permissionsQuery.data,
+							}}
+						>
+							<Sidebar template={templateQuery.data} />
+							<Suspense fallback={<Loader />}>
+								<main css={{ width: "100%" }}>
+									<Outlet />
+								</main>
+							</Suspense>
+						</TemplateSettings.Provider>
+					)}
+				</Stack>
+			</Margins>
+		</>
+	);
+};

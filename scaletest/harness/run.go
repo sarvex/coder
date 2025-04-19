@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"sync"
 	"time"
 
 	"golang.org/x/xerrors"
@@ -27,7 +28,7 @@ type Runnable interface {
 type Cleanable interface {
 	Runnable
 	// Cleanup should clean up any lingering resources from the test.
-	Cleanup(ctx context.Context, id string) error
+	Cleanup(ctx context.Context, id string, logs io.Writer) error
 }
 
 // AddRun creates a new *TestRun with the given name, ID and Runnable, adds it
@@ -65,7 +66,7 @@ type TestRun struct {
 	id       string
 	runner   Runnable
 
-	logs     *bytes.Buffer
+	logs     *syncBuffer
 	done     chan struct{}
 	started  time.Time
 	duration time.Duration
@@ -87,7 +88,9 @@ func (r *TestRun) FullID() string {
 // Run executes the Run function with a self-managed log writer, panic handler,
 // error recording and duration recording. The test error is returned.
 func (r *TestRun) Run(ctx context.Context) (err error) {
-	r.logs = new(bytes.Buffer)
+	r.logs = &syncBuffer{
+		buf: new(bytes.Buffer),
+	}
 	r.done = make(chan struct{})
 	defer close(r.done)
 
@@ -128,7 +131,24 @@ func (r *TestRun) Cleanup(ctx context.Context) (err error) {
 		}
 	}()
 
-	err = c.Cleanup(ctx, r.id)
+	err = c.Cleanup(ctx, r.id, r.logs)
 	//nolint:revive // we use named returns because we mutate it in a defer
 	return
+}
+
+type syncBuffer struct {
+	buf *bytes.Buffer
+	mut sync.Mutex
+}
+
+func (sb *syncBuffer) Write(p []byte) (n int, err error) {
+	sb.mut.Lock()
+	defer sb.mut.Unlock()
+	return sb.buf.Write(p)
+}
+
+func (sb *syncBuffer) String() string {
+	sb.mut.Lock()
+	defer sb.mut.Unlock()
+	return sb.buf.String()
 }

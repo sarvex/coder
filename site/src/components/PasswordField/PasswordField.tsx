@@ -1,52 +1,37 @@
-import IconButton from "@mui/material/IconButton"
-import InputAdornment from "@mui/material/InputAdornment"
-import { makeStyles } from "@mui/styles"
-import TextField, { TextFieldProps } from "@mui/material/TextField"
-import VisibilityOffOutlined from "@mui/icons-material/VisibilityOffOutlined"
-import VisibilityOutlined from "@mui/icons-material/VisibilityOutlined"
-import { useCallback, useState, FC, PropsWithChildren } from "react"
+import TextField, { type TextFieldProps } from "@mui/material/TextField";
+import { API } from "api/api";
+import { useDebouncedValue } from "hooks/debounce";
+import type { FC } from "react";
+import { useQuery } from "react-query";
 
-type PasswordFieldProps = Omit<TextFieldProps, "InputProps" | "type">
+// TODO: @BrunoQuaresma: Unable to integrate Yup + Formik for validation. The
+// validation was triggering on the onChange event, but the form.errors were not
+// updating accordingly. Tried various combinations of validateOnBlur and
+// validateOnChange without success. Further investigation is needed.
 
-export const PasswordField: FC<PropsWithChildren<PasswordFieldProps>> = ({
-  variant = "outlined",
-  ...rest
-}) => {
-  const styles = useStyles()
-  const [showPassword, setShowPassword] = useState<boolean>(false)
+/**
+ * A password field component that validates the password against the API with
+ * debounced calls. It uses a debounced value to minimize the number of API
+ * calls and displays validation errors.
+ */
+export const PasswordField: FC<TextFieldProps> = (props) => {
+	const debouncedValue = useDebouncedValue(`${props.value}`, 500);
+	const validatePasswordQuery = useQuery({
+		queryKey: ["validatePassword", debouncedValue],
+		queryFn: () => API.validateUserPassword(debouncedValue),
+		keepPreviousData: true,
+		enabled: debouncedValue.length > 0,
+	});
+	const valid = validatePasswordQuery.data?.valid ?? true;
 
-  const handleVisibilityChange = useCallback(
-    () => setShowPassword((showPassword) => !showPassword),
-    [],
-  )
-  const VisibilityIcon = showPassword
-    ? VisibilityOffOutlined
-    : VisibilityOutlined
-
-  return (
-    <TextField
-      {...rest}
-      type={showPassword ? "text" : "password"}
-      variant={variant}
-      InputProps={{
-        endAdornment: (
-          <InputAdornment position="end">
-            <IconButton
-              aria-label="toggle password visibility"
-              onClick={handleVisibilityChange}
-              size="small"
-            >
-              <VisibilityIcon className={styles.visibilityIcon} />
-            </IconButton>
-          </InputAdornment>
-        ),
-      }}
-    />
-  )
-}
-
-const useStyles = makeStyles({
-  visibilityIcon: {
-    fontSize: 20,
-  },
-})
+	return (
+		<TextField
+			{...props}
+			type="password"
+			error={!valid || props.error}
+			helperText={
+				!valid ? validatePasswordQuery.data?.details : props.helperText
+			}
+		/>
+	);
+};

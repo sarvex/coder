@@ -10,23 +10,23 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/database/dbfake"
-	"github.com/coder/coder/coderd/database/dbgen"
-	"github.com/coder/coder/coderd/httpmw"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbgen"
+	"github.com/coder/coder/v2/coderd/database/dbmem"
+	"github.com/coder/coder/v2/coderd/httpmw"
+	"github.com/coder/coder/v2/codersdk"
 )
 
 func TestWorkspaceBuildParam(t *testing.T) {
 	t.Parallel()
 
-	setupAuthentication := func(db database.Store) (*http.Request, database.Workspace) {
+	setupAuthentication := func(db database.Store) (*http.Request, database.WorkspaceTable) {
 		var (
 			user     = dbgen.User(t, db, database.User{})
 			_, token = dbgen.APIKey(t, db, database.APIKey{
 				UserID: user.ID,
 			})
-			workspace = dbgen.Workspace(t, db, database.Workspace{
+			workspace = dbgen.Workspace(t, db, database.WorkspaceTable{
 				OwnerID: user.ID,
 			})
 		)
@@ -43,7 +43,7 @@ func TestWorkspaceBuildParam(t *testing.T) {
 
 	t.Run("None", func(t *testing.T) {
 		t.Parallel()
-		db := dbfake.New()
+		db := dbmem.New()
 		rtr := chi.NewRouter()
 		rtr.Use(httpmw.ExtractWorkspaceBuildParam(db))
 		rtr.Get("/", nil)
@@ -58,7 +58,7 @@ func TestWorkspaceBuildParam(t *testing.T) {
 
 	t.Run("NotFound", func(t *testing.T) {
 		t.Parallel()
-		db := dbfake.New()
+		db := dbmem.New()
 		rtr := chi.NewRouter()
 		rtr.Use(httpmw.ExtractWorkspaceBuildParam(db))
 		rtr.Get("/", nil)
@@ -75,7 +75,7 @@ func TestWorkspaceBuildParam(t *testing.T) {
 
 	t.Run("WorkspaceBuild", func(t *testing.T) {
 		t.Parallel()
-		db := dbfake.New()
+		db := dbmem.New()
 		rtr := chi.NewRouter()
 		rtr.Use(
 			httpmw.ExtractAPIKeyMW(httpmw.ExtractAPIKeyConfig{

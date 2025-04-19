@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,12 +17,11 @@ import (
 
 	"github.com/acarl005/stripansi"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/exp/slices"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/pty"
-	"github.com/coder/coder/testutil"
+	"github.com/coder/coder/v2/pty"
+	"github.com/coder/coder/v2/testutil"
+	"github.com/coder/serpent"
 )
 
 func New(t *testing.T, opts ...pty.Option) *PTY {
@@ -145,22 +146,40 @@ type outExpecter struct {
 }
 
 func (e *outExpecter) ExpectMatch(str string) string {
+	return e.expectMatchContextFunc(str, e.ExpectMatchContext)
+}
+
+func (e *outExpecter) ExpectRegexMatch(str string) string {
+	return e.expectMatchContextFunc(str, e.ExpectRegexMatchContext)
+}
+
+func (e *outExpecter) expectMatchContextFunc(str string, fn func(ctx context.Context, str string) string) string {
 	e.t.Helper()
 
 	timeout, cancel := context.WithTimeout(context.Background(), testutil.WaitMedium)
 	defer cancel()
 
-	return e.ExpectMatchContext(timeout, str)
+	return fn(timeout, str)
 }
 
 // TODO(mafredri): Rename this to ExpectMatch when refactoring.
 func (e *outExpecter) ExpectMatchContext(ctx context.Context, str string) string {
+	return e.expectMatcherFunc(ctx, str, strings.Contains)
+}
+
+func (e *outExpecter) ExpectRegexMatchContext(ctx context.Context, str string) string {
+	return e.expectMatcherFunc(ctx, str, func(src, pattern string) bool {
+		return regexp.MustCompile(pattern).MatchString(src)
+	})
+}
+
+func (e *outExpecter) expectMatcherFunc(ctx context.Context, str string, fn func(src, pattern string) bool) string {
 	e.t.Helper()
 
 	var buffer bytes.Buffer
-	err := e.doMatchWithDeadline(ctx, "ExpectMatchContext", func() error {
+	err := e.doMatchWithDeadline(ctx, "ExpectMatchContext", func(rd *bufio.Reader) error {
 		for {
-			r, _, err := e.runeReader.ReadRune()
+			r, _, err := rd.ReadRune()
 			if err != nil {
 				return err
 			}
@@ -168,7 +187,7 @@ func (e *outExpecter) ExpectMatchContext(ctx context.Context, str string) string
 			if err != nil {
 				return err
 			}
-			if strings.Contains(buffer.String(), str) {
+			if fn(buffer.String(), str) {
 				return nil
 			}
 		}
@@ -177,7 +196,40 @@ func (e *outExpecter) ExpectMatchContext(ctx context.Context, str string) string
 		e.fatalf("read error", "%v (wanted %q; got %q)", err, str, buffer.String())
 		return ""
 	}
-	e.logf("matched %q = %q", str, stripansi.Strip(buffer.String()))
+	e.logf("matched %q = %q", str, buffer.String())
+	return buffer.String()
+}
+
+// ExpectNoMatchBefore validates that `match` does not occur before `before`.
+func (e *outExpecter) ExpectNoMatchBefore(ctx context.Context, match, before string) string {
+	e.t.Helper()
+
+	var buffer bytes.Buffer
+	err := e.doMatchWithDeadline(ctx, "ExpectNoMatchBefore", func(rd *bufio.Reader) error {
+		for {
+			r, _, err := rd.ReadRune()
+			if err != nil {
+				return err
+			}
+			_, err = buffer.WriteRune(r)
+			if err != nil {
+				return err
+			}
+
+			if strings.Contains(buffer.String(), match) {
+				return xerrors.Errorf("found %q before %q", match, before)
+			}
+
+			if strings.Contains(buffer.String(), before) {
+				return nil
+			}
+		}
+	})
+	if err != nil {
+		e.fatalf("read error", "%v (wanted no %q before %q; got %q)", err, match, before, buffer.String())
+		return ""
+	}
+	e.logf("matched %q = %q", before, stripansi.Strip(buffer.String()))
 	return buffer.String()
 }
 
@@ -185,9 +237,9 @@ func (e *outExpecter) Peek(ctx context.Context, n int) []byte {
 	e.t.Helper()
 
 	var out []byte
-	err := e.doMatchWithDeadline(ctx, "Peek", func() error {
+	err := e.doMatchWithDeadline(ctx, "Peek", func(rd *bufio.Reader) error {
 		var err error
-		out, err = e.runeReader.Peek(n)
+		out, err = rd.Peek(n)
 		return err
 	})
 	if err != nil {
@@ -198,13 +250,14 @@ func (e *outExpecter) Peek(ctx context.Context, n int) []byte {
 	return slices.Clone(out)
 }
 
+//nolint:govet // We don't care about conforming to ReadRune() (rune, int, error).
 func (e *outExpecter) ReadRune(ctx context.Context) rune {
 	e.t.Helper()
 
 	var r rune
-	err := e.doMatchWithDeadline(ctx, "ReadRune", func() error {
+	err := e.doMatchWithDeadline(ctx, "ReadRune", func(rd *bufio.Reader) error {
 		var err error
-		r, _, err = e.runeReader.ReadRune()
+		r, _, err = rd.ReadRune()
 		return err
 	})
 	if err != nil {
@@ -219,9 +272,9 @@ func (e *outExpecter) ReadLine(ctx context.Context) string {
 	e.t.Helper()
 
 	var buffer bytes.Buffer
-	err := e.doMatchWithDeadline(ctx, "ReadLine", func() error {
+	err := e.doMatchWithDeadline(ctx, "ReadLine", func(rd *bufio.Reader) error {
 		for {
-			r, _, err := e.runeReader.ReadRune()
+			r, _, err := rd.ReadRune()
 			if err != nil {
 				return err
 			}
@@ -234,14 +287,14 @@ func (e *outExpecter) ReadLine(ctx context.Context) string {
 
 				// Unicode code points can be up to 4 bytes, but the
 				// ones we're looking for are only 1 byte.
-				b, _ := e.runeReader.Peek(1)
+				b, _ := rd.Peek(1)
 				if len(b) == 0 {
 					return nil
 				}
 
 				r, _ = utf8.DecodeRune(b)
 				if r == '\n' {
-					_, _, err = e.runeReader.ReadRune()
+					_, _, err = rd.ReadRune()
 					if err != nil {
 						return err
 					}
@@ -264,7 +317,12 @@ func (e *outExpecter) ReadLine(ctx context.Context) string {
 	return buffer.String()
 }
 
-func (e *outExpecter) doMatchWithDeadline(ctx context.Context, name string, fn func() error) error {
+func (e *outExpecter) ReadAll() []byte {
+	e.t.Helper()
+	return e.out.ReadAll()
+}
+
+func (e *outExpecter) doMatchWithDeadline(ctx context.Context, name string, fn func(*bufio.Reader) error) error {
 	e.t.Helper()
 
 	// A timeout is mandatory, caller can decide by passing a context
@@ -281,14 +339,15 @@ func (e *outExpecter) doMatchWithDeadline(ctx context.Context, name string, fn f
 	match := make(chan error, 1)
 	go func() {
 		defer close(match)
-		match <- fn()
+		match <- fn(e.runeReader)
 	}()
 	select {
 	case err := <-match:
 		return err
 	case <-ctx.Done():
-		// Ensure goroutine is cleaned up before test exit.
-		_ = e.close("match deadline exceeded")
+		// Ensure goroutine is cleaned up before test exit, do not call
+		// (*outExpecter).close here to let the caller decide.
+		_ = e.out.Close()
 		<-match
 
 		return xerrors.Errorf("match deadline exceeded: %w", ctx.Err())
@@ -316,19 +375,31 @@ func (e *outExpecter) fatalf(reason string, format string, args ...interface{}) 
 type PTY struct {
 	outExpecter
 	pty.PTY
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (p *PTY) Close() error {
 	p.t.Helper()
-	pErr := p.PTY.Close()
-	eErr := p.outExpecter.close("close")
-	if pErr != nil {
-		return pErr
-	}
-	return eErr
+	p.closeOnce.Do(func() {
+		pErr := p.PTY.Close()
+		if pErr != nil {
+			p.logf("PTY: Close failed: %v", pErr)
+		}
+		eErr := p.outExpecter.close("PTY close")
+		if eErr != nil {
+			p.logf("PTY: close expecter failed: %v", eErr)
+		}
+		if pErr != nil {
+			p.closeErr = pErr
+			return
+		}
+		p.closeErr = eErr
+	})
+	return p.closeErr
 }
 
-func (p *PTY) Attach(inv *clibase.Invocation) *PTY {
+func (p *PTY) Attach(inv *serpent.Invocation) *PTY {
 	p.t.Helper()
 
 	inv.Stdout = p.Output()
@@ -365,7 +436,13 @@ type PTYCmd struct {
 func (p *PTYCmd) Close() error {
 	p.t.Helper()
 	pErr := p.PTYCmd.Close()
-	eErr := p.outExpecter.close("close")
+	if pErr != nil {
+		p.logf("PTYCmd: Close failed: %v", pErr)
+	}
+	eErr := p.outExpecter.close("PTYCmd close")
+	if eErr != nil {
+		p.logf("PTYCmd: close expecter failed: %v", eErr)
+	}
 	if pErr != nil {
 		return pErr
 	}
@@ -384,6 +461,18 @@ type stdbuf struct {
 
 func newStdbuf() *stdbuf {
 	return &stdbuf{more: make(chan struct{}, 1)}
+}
+
+func (b *stdbuf) ReadAll() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.err != nil {
+		return nil
+	}
+	p := append([]byte(nil), b.b...)
+	b.b = b.b[len(b.b):]
+	return p
 }
 
 func (b *stdbuf) Read(p []byte) (int, error) {

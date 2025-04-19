@@ -8,23 +8,25 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/cli/clitest"
-	"github.com/coder/coder/testutil"
+	"github.com/coder/coder/v2/cli/clitest"
+	"github.com/coder/coder/v2/testutil"
 )
 
 func TestVersion(t *testing.T) {
 	t.Parallel()
+
 	expectedText := `Coder v0.0.0-devel
 https://github.com/coder/coder
 
-Full build of Coder, supports the  [;mserver[0m  subcommand.
+Full build of Coder, supports the server subcommand.
 `
 	expectedJSON := `{
   "version": "v0.0.0-devel",
   "build_time": "0001-01-01T00:00:00Z",
   "external_url": "https://github.com/coder/coder",
   "slim": false,
-  "agpl": false
+  "agpl": false,
+  "boring_crypto": false
 }
 `
 	for _, tt := range []struct {

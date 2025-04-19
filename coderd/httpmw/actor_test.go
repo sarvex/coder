@@ -10,11 +10,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/database/dbfake"
-	"github.com/coder/coder/coderd/database/dbgen"
-	"github.com/coder/coder/coderd/httpmw"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbgen"
+	"github.com/coder/coder/v2/coderd/database/dbmem"
+	"github.com/coder/coder/v2/coderd/database/dbtime"
+	"github.com/coder/coder/v2/coderd/httpmw"
+	"github.com/coder/coder/v2/codersdk"
 )
 
 func TestRequireAPIKeyOrWorkspaceProxyAuth(t *testing.T) {
@@ -37,11 +38,11 @@ func TestRequireAPIKeyOrWorkspaceProxyAuth(t *testing.T) {
 		t.Parallel()
 
 		var (
-			db       = dbfake.New()
+			db       = dbmem.New()
 			user     = dbgen.User(t, db, database.User{})
 			_, token = dbgen.APIKey(t, db, database.APIKey{
 				UserID:    user.ID,
-				ExpiresAt: database.Now().AddDate(0, 0, 1),
+				ExpiresAt: dbtime.Now().AddDate(0, 0, 1),
 			})
 
 			r  = httptest.NewRequest("GET", "/", nil)
@@ -74,11 +75,11 @@ func TestRequireAPIKeyOrWorkspaceProxyAuth(t *testing.T) {
 		t.Parallel()
 
 		var (
-			db           = dbfake.New()
+			db           = dbmem.New()
 			user         = dbgen.User(t, db, database.User{})
 			_, userToken = dbgen.APIKey(t, db, database.APIKey{
 				UserID:    user.ID,
-				ExpiresAt: database.Now().AddDate(0, 0, 1),
+				ExpiresAt: dbtime.Now().AddDate(0, 0, 1),
 			})
 			proxy, proxyToken = dbgen.WorkspaceProxy(t, db, database.WorkspaceProxy{})
 
@@ -113,7 +114,7 @@ func TestRequireAPIKeyOrWorkspaceProxyAuth(t *testing.T) {
 		t.Parallel()
 
 		var (
-			db           = dbfake.New()
+			db           = dbmem.New()
 			proxy, token = dbgen.WorkspaceProxy(t, db, database.WorkspaceProxy{})
 
 			r  = httptest.NewRequest("GET", "/", nil)

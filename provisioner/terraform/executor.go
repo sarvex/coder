@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/go-version"
 	tfjson "github.com/hashicorp/terraform-json"
@@ -20,17 +21,24 @@ import (
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog"
-	"github.com/coder/coder/coderd/tracing"
-	"github.com/coder/coder/provisionersdk/proto"
+
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/tracing"
+	"github.com/coder/coder/v2/provisionersdk/proto"
 )
 
+var version170 = version.Must(version.NewVersion("1.7.0"))
+
 type executor struct {
+	logger     slog.Logger
 	server     *server
 	mut        *sync.Mutex
 	binaryPath string
 	// cachePath and workdir must not be used by multiple processes at once.
 	cachePath string
 	workdir   string
+	// used to capture execution times at various stages
+	timings *timingAggregator
 }
 
 func (e *executor) basicEnv() []string {
@@ -50,8 +58,10 @@ func (e *executor) execWriteOutput(ctx, killCtx context.Context, args, env []str
 	ctx, span := e.server.startTrace(ctx, fmt.Sprintf("exec - terraform %s", args[0]))
 	defer span.End()
 	span.SetAttributes(attribute.StringSlice("args", args))
+	e.logger.Debug(ctx, "starting command", slog.F("args", args))
 
 	defer func() {
+		e.logger.Debug(ctx, "closing writers", slog.Error(err))
 		closeErr := stdOutWriter.Close()
 		if err == nil && closeErr != nil {
 			err = closeErr
@@ -62,6 +72,7 @@ func (e *executor) execWriteOutput(ctx, killCtx context.Context, args, env []str
 		}
 	}()
 	if ctx.Err() != nil {
+		e.logger.Debug(ctx, "context canceled before command started", slog.F("args", args))
 		return ctx.Err()
 	}
 
@@ -84,13 +95,20 @@ func (e *executor) execWriteOutput(ctx, killCtx context.Context, args, env []str
 	cmd.Stdout = syncWriter{mut, stdOutWriter}
 	cmd.Stderr = syncWriter{mut, stdErrWriter}
 
+	e.server.logger.Debug(ctx, "executing terraform command",
+		slog.F("binary_path", e.binaryPath),
+		slog.F("args", args),
+	)
 	err = cmd.Start()
 	if err != nil {
+		e.logger.Debug(ctx, "failed to start command", slog.F("args", args))
 		return err
 	}
-	interruptCommandOnCancel(ctx, killCtx, cmd)
+	interruptCommandOnCancel(ctx, killCtx, e.logger, cmd)
 
-	return cmd.Wait()
+	err = cmd.Wait()
+	e.logger.Debug(ctx, "command done", slog.F("args", args), slog.Error(err))
+	return err
 }
 
 // execParseJSON must only be called while the lock is held.
@@ -112,11 +130,15 @@ func (e *executor) execParseJSON(ctx, killCtx context.Context, args, env []strin
 	cmd.Stdout = out
 	cmd.Stderr = stdErr
 
+	e.server.logger.Debug(ctx, "executing terraform command with JSON result",
+		slog.F("binary_path", e.binaryPath),
+		slog.F("args", args),
+	)
 	err := cmd.Start()
 	if err != nil {
 		return err
 	}
-	interruptCommandOnCancel(ctx, killCtx, cmd)
+	interruptCommandOnCancel(ctx, killCtx, e.logger, cmd)
 
 	err = cmd.Wait()
 	if err != nil {
@@ -178,6 +200,15 @@ func versionFromBinaryPath(ctx context.Context, binaryPath string) (*version.Ver
 	return version.NewVersion(vj.Version)
 }
 
+type textFileBusyError struct {
+	exitErr *exec.ExitError
+	stderr  string
+}
+
+func (e *textFileBusyError) Error() string {
+	return "text file busy: " + e.exitErr.String()
+}
+
 func (e *executor) init(ctx, killCtx context.Context, logr logSink) error {
 	ctx, span := e.server.startTrace(ctx, tracing.FuncName())
 	defer span.End()
@@ -194,24 +225,43 @@ func (e *executor) init(ctx, killCtx context.Context, logr logSink) error {
 		<-doneErr
 	}()
 
+	// As a special case, we want to look for the error "text file busy" in the stderr output of
+	// the init command, so we also take a copy of the stderr into an in memory buffer.
+	errBuf := newBufferedWriteCloser(errWriter)
+
 	args := []string{
 		"init",
 		"-no-color",
 		"-input=false",
 	}
 
-	return e.execWriteOutput(ctx, killCtx, args, e.basicEnv(), outWriter, errWriter)
+	err := e.execWriteOutput(ctx, killCtx, args, e.basicEnv(), outWriter, errBuf)
+	var exitErr *exec.ExitError
+	if xerrors.As(err, &exitErr) {
+		if bytes.Contains(errBuf.b.Bytes(), []byte("text file busy")) {
+			return &textFileBusyError{exitErr: exitErr, stderr: errBuf.b.String()}
+		}
+	}
+	return err
+}
+
+func getPlanFilePath(workdir string) string {
+	return filepath.Join(workdir, "terraform.tfplan")
+}
+
+func getStateFilePath(workdir string) string {
+	return filepath.Join(workdir, "terraform.tfstate")
 }
 
 // revive:disable-next-line:flag-parameter
-func (e *executor) plan(ctx, killCtx context.Context, env, vars []string, logr logSink, destroy bool) (*proto.Provision_Response, error) {
+func (e *executor) plan(ctx, killCtx context.Context, env, vars []string, logr logSink, destroy bool) (*proto.PlanComplete, error) {
 	ctx, span := e.server.startTrace(ctx, tracing.FuncName())
 	defer span.End()
 
 	e.mut.Lock()
 	defer e.mut.Unlock()
 
-	planfilePath := filepath.Join(e.workdir, "terraform.tfplan")
+	planfilePath := getPlanFilePath(e.workdir)
 	args := []string{
 		"plan",
 		"-no-color",
@@ -227,7 +277,7 @@ func (e *executor) plan(ctx, killCtx context.Context, env, vars []string, logr l
 		args = append(args, "-var", variable)
 	}
 
-	outWriter, doneOut := provisionLogWriter(logr)
+	outWriter, doneOut := e.provisionLogWriter(logr)
 	errWriter, doneErr := logWriter(logr, proto.LogLevel_ERROR)
 	defer func() {
 		_ = outWriter.Close()
@@ -240,56 +290,85 @@ func (e *executor) plan(ctx, killCtx context.Context, env, vars []string, logr l
 	if err != nil {
 		return nil, xerrors.Errorf("terraform plan: %w", err)
 	}
-	state, err := e.planResources(ctx, killCtx, planfilePath)
+
+	// Capture the duration of the call to `terraform graph`.
+	graphTimings := newTimingAggregator(database.ProvisionerJobTimingStageGraph)
+	graphTimings.ingest(createGraphTimingsEvent(timingGraphStart))
+
+	state, plan, err := e.planResources(ctx, killCtx, planfilePath)
 	if err != nil {
+		graphTimings.ingest(createGraphTimingsEvent(timingGraphErrored))
 		return nil, err
 	}
-	planFileByt, err := os.ReadFile(planfilePath)
-	if err != nil {
-		return nil, err
-	}
-	return &proto.Provision_Response{
-		Type: &proto.Provision_Response_Complete{
-			Complete: &proto.Provision_Complete{
-				Parameters:       state.Parameters,
-				Resources:        state.Resources,
-				GitAuthProviders: state.GitAuthProviders,
-				Plan:             planFileByt,
-			},
-		},
+
+	graphTimings.ingest(createGraphTimingsEvent(timingGraphComplete))
+
+	return &proto.PlanComplete{
+		Parameters:            state.Parameters,
+		Resources:             state.Resources,
+		ExternalAuthProviders: state.ExternalAuthProviders,
+		Timings:               append(e.timings.aggregate(), graphTimings.aggregate()...),
+		Presets:               state.Presets,
+		Plan:                  plan,
 	}, nil
 }
 
+func onlyDataResources(sm tfjson.StateModule) tfjson.StateModule {
+	filtered := sm
+	filtered.Resources = []*tfjson.StateResource{}
+	for _, r := range sm.Resources {
+		if r.Mode == "data" {
+			filtered.Resources = append(filtered.Resources, r)
+		}
+	}
+
+	filtered.ChildModules = []*tfjson.StateModule{}
+	for _, c := range sm.ChildModules {
+		filteredChild := onlyDataResources(*c)
+		filtered.ChildModules = append(filtered.ChildModules, &filteredChild)
+	}
+	return filtered
+}
+
 // planResources must only be called while the lock is held.
-func (e *executor) planResources(ctx, killCtx context.Context, planfilePath string) (*State, error) {
+func (e *executor) planResources(ctx, killCtx context.Context, planfilePath string) (*State, json.RawMessage, error) {
 	ctx, span := e.server.startTrace(ctx, tracing.FuncName())
 	defer span.End()
 
 	plan, err := e.showPlan(ctx, killCtx, planfilePath)
 	if err != nil {
-		return nil, xerrors.Errorf("show terraform plan file: %w", err)
+		return nil, nil, xerrors.Errorf("show terraform plan file: %w", err)
 	}
 
 	rawGraph, err := e.graph(ctx, killCtx)
 	if err != nil {
-		return nil, xerrors.Errorf("graph: %w", err)
+		return nil, nil, xerrors.Errorf("graph: %w", err)
 	}
 	modules := []*tfjson.StateModule{}
 	if plan.PriorState != nil {
-		modules = append(modules, plan.PriorState.Values.RootModule)
+		// We need the data resources for rich parameters. For some reason, they
+		// only show up in the PriorState.
+		//
+		// We don't want all prior resources, because Quotas (and
+		// future features) would never know which resources are getting
+		// deleted by a stop.
+
+		filtered := onlyDataResources(*plan.PriorState.Values.RootModule)
+		modules = append(modules, &filtered)
 	}
 	modules = append(modules, plan.PlannedValues.RootModule)
 
-	rawParameterNames, err := rawRichParameterNames(e.workdir)
+	state, err := ConvertState(ctx, modules, rawGraph, e.server.logger)
 	if err != nil {
-		return nil, xerrors.Errorf("raw rich parameter names: %w", err)
+		return nil, nil, err
 	}
 
-	state, err := ConvertState(modules, rawGraph, rawParameterNames)
+	planJSON, err := json.Marshal(plan)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return state, nil
+
+	return state, planJSON, nil
 }
 
 // showPlan must only be called while the lock is held.
@@ -312,17 +391,29 @@ func (e *executor) graph(ctx, killCtx context.Context) (string, error) {
 		return "", ctx.Err()
 	}
 
+	ver, err := e.version(ctx)
+	if err != nil {
+		return "", err
+	}
+	args := []string{"graph"}
+	if ver.GreaterThanOrEqual(version170) {
+		args = append(args, "-type=plan")
+	}
 	var out strings.Builder
-	cmd := exec.CommandContext(killCtx, e.binaryPath, "graph") // #nosec
+	cmd := exec.CommandContext(killCtx, e.binaryPath, args...) // #nosec
 	cmd.Stdout = &out
 	cmd.Dir = e.workdir
 	cmd.Env = e.basicEnv()
 
-	err := cmd.Start()
+	e.server.logger.Debug(ctx, "executing terraform command graph",
+		slog.F("binary_path", e.binaryPath),
+		slog.F("args", "graph"),
+	)
+	err = cmd.Start()
 	if err != nil {
 		return "", err
 	}
-	interruptCommandOnCancel(ctx, killCtx, cmd)
+	interruptCommandOnCancel(ctx, killCtx, e.logger, cmd)
 
 	err = cmd.Wait()
 	if err != nil {
@@ -333,25 +424,14 @@ func (e *executor) graph(ctx, killCtx context.Context) (string, error) {
 
 func (e *executor) apply(
 	ctx, killCtx context.Context,
-	plan []byte,
 	env []string,
 	logr logSink,
-) (*proto.Provision_Response, error) {
+) (*proto.ApplyComplete, error) {
 	ctx, span := e.server.startTrace(ctx, tracing.FuncName())
 	defer span.End()
 
 	e.mut.Lock()
 	defer e.mut.Unlock()
-
-	planFile, err := os.CreateTemp("", "coder-terrafrom-plan")
-	if err != nil {
-		return nil, xerrors.Errorf("create plan file: %w", err)
-	}
-	_, err = planFile.Write(plan)
-	if err != nil {
-		return nil, xerrors.Errorf("write plan file: %w", err)
-	}
-	defer os.Remove(planFile.Name())
 
 	args := []string{
 		"apply",
@@ -359,10 +439,10 @@ func (e *executor) apply(
 		"-auto-approve",
 		"-input=false",
 		"-json",
-		planFile.Name(),
+		getPlanFilePath(e.workdir),
 	}
 
-	outWriter, doneOut := provisionLogWriter(logr)
+	outWriter, doneOut := e.provisionLogWriter(logr)
 	errWriter, doneErr := logWriter(logr, proto.LogLevel_ERROR)
 	defer func() {
 		_ = outWriter.Close()
@@ -371,7 +451,7 @@ func (e *executor) apply(
 		<-doneErr
 	}()
 
-	err = e.execWriteOutput(ctx, killCtx, args, env, outWriter, errWriter)
+	err := e.execWriteOutput(ctx, killCtx, args, env, outWriter, errWriter)
 	if err != nil {
 		return nil, xerrors.Errorf("terraform apply: %w", err)
 	}
@@ -384,15 +464,13 @@ func (e *executor) apply(
 	if err != nil {
 		return nil, xerrors.Errorf("read statefile %q: %w", statefilePath, err)
 	}
-	return &proto.Provision_Response{
-		Type: &proto.Provision_Response_Complete{
-			Complete: &proto.Provision_Complete{
-				Parameters:       state.Parameters,
-				Resources:        state.Resources,
-				GitAuthProviders: state.GitAuthProviders,
-				State:            stateContent,
-			},
-		},
+
+	return &proto.ApplyComplete{
+		Parameters:            state.Parameters,
+		Resources:             state.Resources,
+		ExternalAuthProviders: state.ExternalAuthProviders,
+		State:                 stateContent,
+		Timings:               e.timings.aggregate(),
 	}, nil
 }
 
@@ -410,18 +488,15 @@ func (e *executor) stateResources(ctx, killCtx context.Context) (*State, error) 
 		return nil, xerrors.Errorf("get terraform graph: %w", err)
 	}
 	converted := &State{}
-	if state.Values != nil {
-		rawParameterNames, err := rawRichParameterNames(e.workdir)
-		if err != nil {
-			return nil, xerrors.Errorf("raw rich parameter names: %w", err)
-		}
+	if state.Values == nil {
+		return converted, nil
+	}
 
-		converted, err = ConvertState([]*tfjson.StateModule{
-			state.Values.RootModule,
-		}, rawGraph, rawParameterNames)
-		if err != nil {
-			return nil, err
-		}
+	converted, err = ConvertState(ctx, []*tfjson.StateModule{
+		state.Values.RootModule,
+	}, rawGraph, e.server.logger)
+	if err != nil {
+		return nil, err
 	}
 	return converted, nil
 }
@@ -440,48 +515,28 @@ func (e *executor) state(ctx, killCtx context.Context) (*tfjson.State, error) {
 	return state, nil
 }
 
-func interruptCommandOnCancel(ctx, killCtx context.Context, cmd *exec.Cmd) {
+func interruptCommandOnCancel(ctx, killCtx context.Context, logger slog.Logger, cmd *exec.Cmd) {
 	go func() {
 		select {
 		case <-ctx.Done():
+			var err error
 			switch runtime.GOOS {
 			case "windows":
 				// Interrupts aren't supported by Windows.
-				_ = cmd.Process.Kill()
+				err = cmd.Process.Kill()
 			default:
-				_ = cmd.Process.Signal(os.Interrupt)
+				err = cmd.Process.Signal(os.Interrupt)
 			}
+			logger.Debug(ctx, "interrupted command", slog.F("args", cmd.Args), slog.Error(err))
 
 		case <-killCtx.Done():
+			logger.Debug(ctx, "kill context ended", slog.F("args", cmd.Args))
 		}
 	}()
 }
 
 type logSink interface {
-	Log(*proto.Log)
-}
-
-type streamLogSink struct {
-	// Any errors writing to the stream will be logged to logger.
-	logger slog.Logger
-	stream proto.DRPCProvisioner_ProvisionStream
-}
-
-var _ logSink = streamLogSink{}
-
-func (s streamLogSink) Log(l *proto.Log) {
-	err := s.stream.Send(&proto.Provision_Response{
-		Type: &proto.Provision_Response_Log{
-			Log: l,
-		},
-	})
-	if err != nil {
-		s.logger.Warn(context.Background(), "write log to stream",
-			slog.F("level", l.Level.String()),
-			slog.F("message", l.Output),
-			slog.Error(err),
-		)
-	}
+	ProvisionLog(l proto.LogLevel, o string)
 }
 
 // logWriter creates a WriteCloser that will log each line of text at the given level.  The WriteCloser must be closed
@@ -505,7 +560,7 @@ func readAndLog(sink logSink, r io.Reader, done chan<- any, level proto.LogLevel
 				continue
 			}
 
-			sink.Log(&proto.Log{Level: level, Output: scanner.Text()})
+			sink.ProvisionLog(level, scanner.Text())
 			continue
 		}
 
@@ -522,52 +577,48 @@ func readAndLog(sink logSink, r io.Reader, done chan<- any, level proto.LogLevel
 		if logLevel == proto.LogLevel_INFO {
 			logLevel = proto.LogLevel_DEBUG
 		}
-		sink.Log(&proto.Log{Level: logLevel, Output: log.Message})
+		sink.ProvisionLog(logLevel, log.Message)
 	}
 }
 
 // provisionLogWriter creates a WriteCloser that will log each JSON formatted terraform log.  The WriteCloser must be
 // closed by the caller to end logging, after which the returned channel will be closed to indicate that logging of the
 // written data has finished.  Failure to close the WriteCloser will leak a goroutine.
-func provisionLogWriter(sink logSink) (io.WriteCloser, <-chan any) {
+func (e *executor) provisionLogWriter(sink logSink) (io.WriteCloser, <-chan any) {
 	r, w := io.Pipe()
 	done := make(chan any)
-	go provisionReadAndLog(sink, r, done)
+
+	go e.provisionReadAndLog(sink, r, done)
 	return w, done
 }
 
-func provisionReadAndLog(sink logSink, r io.Reader, done chan<- any) {
+func (e *executor) provisionReadAndLog(sink logSink, r io.Reader, done chan<- any) {
 	defer close(done)
+
+	errCount := 0
+
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
-		var log terraformProvisionLog
-		err := json.Unmarshal(scanner.Bytes(), &log)
-		if err != nil {
-			// Sometimes terraform doesn't log JSON, even though we asked it to.
-			// The terraform maintainers have said on the issue tracker that
-			// they don't guarantee that non-JSON lines won't get printed.
-			// https://github.com/hashicorp/terraform/issues/29252#issuecomment-887710001
-			//
-			// > I think as a practical matter it isn't possible for us to
-			// > promise that the output will always be entirely JSON, because
-			// > there's plenty of code that runs before command line arguments
-			// > are parsed and thus before we even know we're in JSON mode.
-			// > Given that, I'd suggest writing code that consumes streaming
-			// > JSON output from Terraform in such a way that it can tolerate
-			// > the output not having JSON in it at all.
-			//
-			// Log lines such as:
-			// - Acquiring state lock. This may take a few moments...
-			// - Releasing state lock. This may take a few moments...
-			if strings.TrimSpace(scanner.Text()) == "" {
-				continue
-			}
-			log.Level = "info"
-			log.Message = scanner.Text()
+		log := parseTerraformLogLine(scanner.Bytes())
+		if log == nil {
+			continue
 		}
 
 		logLevel := convertTerraformLogLevel(log.Level, sink)
-		sink.Log(&proto.Log{Level: logLevel, Output: log.Message})
+		sink.ProvisionLog(logLevel, log.Message)
+
+		ts, span, err := extractTimingSpan(log)
+		if err != nil {
+			// It's too noisy to log all of these as timings are not an essential feature, but we do need to log *some*.
+			if errCount%10 == 0 {
+				e.logger.Warn(context.Background(), "(sampled) failed to extract timings entry from log line",
+					slog.F("line", log.Message), slog.Error(err))
+			}
+			errCount++
+		} else {
+			// Only ingest valid timings.
+			e.timings.ingest(ts, span)
+		}
 
 		// If the diagnostic is provided, let's provide a bit more info!
 		if log.Diagnostic == nil {
@@ -575,9 +626,63 @@ func provisionReadAndLog(sink logSink, r io.Reader, done chan<- any) {
 		}
 		logLevel = convertTerraformLogLevel(string(log.Diagnostic.Severity), sink)
 		for _, diagLine := range strings.Split(FormatDiagnostic(log.Diagnostic), "\n") {
-			sink.Log(&proto.Log{Level: logLevel, Output: diagLine})
+			sink.ProvisionLog(logLevel, diagLine)
 		}
 	}
+}
+
+func parseTerraformLogLine(line []byte) *terraformProvisionLog {
+	var log terraformProvisionLog
+	err := json.Unmarshal(line, &log)
+	if err != nil {
+		// Sometimes terraform doesn't log JSON, even though we asked it to.
+		// The terraform maintainers have said on the issue tracker that
+		// they don't guarantee that non-JSON lines won't get printed.
+		// https://github.com/hashicorp/terraform/issues/29252#issuecomment-887710001
+		//
+		// > I think as a practical matter it isn't possible for us to
+		// > promise that the output will always be entirely JSON, because
+		// > there's plenty of code that runs before command line arguments
+		// > are parsed and thus before we even know we're in JSON mode.
+		// > Given that, I'd suggest writing code that consumes streaming
+		// > JSON output from Terraform in such a way that it can tolerate
+		// > the output not having JSON in it at all.
+		//
+		// Log lines such as:
+		// - Acquiring state lock. This may take a few moments...
+		// - Releasing state lock. This may take a few moments...
+		if len(bytes.TrimSpace(line)) == 0 {
+			return nil
+		}
+		log.Level = "info"
+		log.Message = string(line)
+	}
+	return &log
+}
+
+func extractTimingSpan(log *terraformProvisionLog) (time.Time, *timingSpan, error) {
+	// Input is not well-formed, bail out.
+	if log.Type == "" {
+		return time.Time{}, nil, xerrors.Errorf("invalid timing kind: %q", log.Type)
+	}
+
+	typ := timingKind(log.Type)
+	if !typ.Valid() {
+		return time.Time{}, nil, xerrors.Errorf("unexpected timing kind: %q", log.Type)
+	}
+
+	ts, err := time.Parse("2006-01-02T15:04:05.000000Z07:00", log.Timestamp)
+	if err != nil {
+		// TODO: log
+		ts = time.Now()
+	}
+
+	return ts, &timingSpan{
+		kind:     typ,
+		action:   log.Hook.Action,
+		provider: log.Hook.Resource.Provider,
+		resource: log.Hook.Resource.Addr,
+	}, nil
 }
 
 func convertTerraformLogLevel(logLevel string, sink logSink) proto.LogLevel {
@@ -593,19 +698,29 @@ func convertTerraformLogLevel(logLevel string, sink logSink) proto.LogLevel {
 	case "error":
 		return proto.LogLevel_ERROR
 	default:
-		sink.Log(&proto.Log{
-			Level:  proto.LogLevel_WARN,
-			Output: fmt.Sprintf("unable to convert log level %s", logLevel),
-		})
+		sink.ProvisionLog(proto.LogLevel_WARN, fmt.Sprintf("unable to convert log level %s", logLevel))
 		return proto.LogLevel_INFO
 	}
 }
 
 type terraformProvisionLog struct {
-	Level   string `json:"@level"`
-	Message string `json:"@message"`
+	Level     string                    `json:"@level"`
+	Message   string                    `json:"@message"`
+	Timestamp string                    `json:"@timestamp"`
+	Type      string                    `json:"type"`
+	Hook      terraformProvisionLogHook `json:"hook"`
 
 	Diagnostic *tfjson.Diagnostic `json:"diagnostic,omitempty"`
+}
+
+type terraformProvisionLogHook struct {
+	Action   string                            `json:"action"`
+	Resource terraformProvisionLogHookResource `json:"resource"`
+}
+
+type terraformProvisionLogHookResource struct {
+	Addr     string `json:"addr"`
+	Provider string `json:"implied_provider"`
 }
 
 // syncWriter wraps an io.Writer in a sync.Mutex.
@@ -619,4 +734,27 @@ func (sw syncWriter) Write(p []byte) (n int, err error) {
 	sw.mut.Lock()
 	defer sw.mut.Unlock()
 	return sw.w.Write(p)
+}
+
+type bufferedWriteCloser struct {
+	wc io.WriteCloser
+	b  bytes.Buffer
+}
+
+func newBufferedWriteCloser(wc io.WriteCloser) *bufferedWriteCloser {
+	return &bufferedWriteCloser{
+		wc: wc,
+	}
+}
+
+func (b *bufferedWriteCloser) Write(p []byte) (int, error) {
+	n, err := b.b.Write(p)
+	if err != nil {
+		return n, err
+	}
+	return b.wc.Write(p)
+}
+
+func (b *bufferedWriteCloser) Close() error {
+	return b.wc.Close()
 }

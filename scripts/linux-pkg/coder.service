@@ -1,10 +1,10 @@
 [Unit]
 Description="Coder - Self-hosted developer workspaces on your infra"
-Documentation=https://coder.com/docs/coder-oss
+Documentation=https://coder.com/docs
 Requires=network-online.target
 After=network-online.target
 ConditionFileNotEmpty=/etc/coder.d/coder.env
-StartLimitIntervalSec=60
+StartLimitIntervalSec=10
 StartLimitBurst=3
 
 [Service]

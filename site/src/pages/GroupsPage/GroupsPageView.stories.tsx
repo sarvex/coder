@@ -1,40 +1,51 @@
-import { Story } from "@storybook/react"
-import { MockGroup } from "testHelpers/entities"
-import { GroupsPageView, GroupsPageViewProps } from "./GroupsPageView"
+import type { Meta, StoryObj } from "@storybook/react";
+import { MockGroup } from "testHelpers/entities";
+import { GroupsPageView } from "./GroupsPageView";
 
-export default {
-  title: "pages/GroupsPageView",
-  component: GroupsPageView,
-}
+const meta: Meta<typeof GroupsPageView> = {
+	title: "pages/OrganizationGroupsPage",
+	component: GroupsPageView,
+};
 
-const Template: Story<GroupsPageViewProps> = (args: GroupsPageViewProps) => (
-  <GroupsPageView {...args} />
-)
+export default meta;
+type Story = StoryObj<typeof GroupsPageView>;
 
-export const NotEnabled = Template.bind({})
-NotEnabled.args = {
-  groups: [MockGroup],
-  canCreateGroup: true,
-  isTemplateRBACEnabled: false,
-}
+export const NotEnabled: Story = {
+	args: {
+		groups: [MockGroup],
+		canCreateGroup: true,
+		groupsEnabled: false,
+	},
+};
 
-export const WithGroups = Template.bind({})
-WithGroups.args = {
-  groups: [MockGroup],
-  canCreateGroup: true,
-  isTemplateRBACEnabled: true,
-}
+export const WithGroups: Story = {
+	args: {
+		groups: [MockGroup],
+		canCreateGroup: true,
+		groupsEnabled: true,
+	},
+};
 
-export const EmptyGroup = Template.bind({})
-EmptyGroup.args = {
-  groups: [],
-  canCreateGroup: false,
-  isTemplateRBACEnabled: true,
-}
+export const WithDisplayGroup: Story = {
+	args: {
+		groups: [{ ...MockGroup, name: "front-end" }],
+		canCreateGroup: true,
+		groupsEnabled: true,
+	},
+};
 
-export const EmptyGroupWithPermission = Template.bind({})
-EmptyGroupWithPermission.args = {
-  groups: [],
-  canCreateGroup: true,
-  isTemplateRBACEnabled: true,
-}
+export const EmptyGroup: Story = {
+	args: {
+		groups: [],
+		canCreateGroup: false,
+		groupsEnabled: true,
+	},
+};
+
+export const EmptyGroupWithPermission: Story = {
+	args: {
+		groups: [],
+		canCreateGroup: true,
+		groupsEnabled: true,
+	},
+};

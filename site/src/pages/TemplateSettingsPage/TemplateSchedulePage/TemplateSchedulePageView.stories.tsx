@@ -1,31 +1,45 @@
-import { action } from "@storybook/addon-actions"
-import { Story } from "@storybook/react"
-import { MockTemplate } from "testHelpers/entities"
-import {
-  TemplateSchedulePageView,
-  TemplateSchedulePageViewProps,
-} from "./TemplateSchedulePageView"
+import { action } from "@storybook/addon-actions";
+import type { Meta, StoryObj } from "@storybook/react";
+import { QueryClient, QueryClientProvider } from "react-query";
+import { MockTemplate } from "testHelpers/entities";
+import { TemplateSchedulePageView } from "./TemplateSchedulePageView";
 
-export default {
-  title: "pages/TemplateSchedulePageView",
-  component: TemplateSchedulePageView,
-  args: {
-    allowAdvancedScheduling: true,
-    allowWorkspaceActions: true,
-    template: MockTemplate,
-    onSubmit: action("onSubmit"),
-    onCancel: action("cancel"),
-  },
-}
+const queryClient = new QueryClient({
+	defaultOptions: {
+		queries: {
+			retry: false,
+			cacheTime: 0,
+			refetchOnWindowFocus: false,
+			networkMode: "offlineFirst",
+		},
+	},
+});
 
-const Template: Story<TemplateSchedulePageViewProps> = (args) => (
-  <TemplateSchedulePageView {...args} />
-)
+const meta: Meta<typeof TemplateSchedulePageView> = {
+	title: "pages/TemplateSettingsPage/TemplateSchedulePageView",
+	component: TemplateSchedulePageView,
+	decorators: [
+		(Story) => (
+			<QueryClientProvider client={queryClient}>
+				<Story />
+			</QueryClientProvider>
+		),
+	],
+};
+export default meta;
+type Story = StoryObj<typeof TemplateSchedulePageView>;
 
-export const Example = Template.bind({})
-Example.args = {}
+const defaultArgs = {
+	allowAdvancedScheduling: true,
+	template: MockTemplate,
+	onSubmit: action("onSubmit"),
+	onCancel: action("cancel"),
+};
 
-export const CantSetMaxTTL = Template.bind({})
-CantSetMaxTTL.args = {
-  allowAdvancedScheduling: false,
-}
+export const Example: Story = {
+	args: { ...defaultArgs },
+};
+
+export const CantSetMaxTTL: Story = {
+	args: { ...defaultArgs, allowAdvancedScheduling: false },
+};

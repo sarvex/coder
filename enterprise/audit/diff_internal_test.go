@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/coderd/audit"
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/util/ptr"
+	"github.com/coder/coder/v2/coderd/audit"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/util/ptr"
 )
 
 func Test_diffValues(t *testing.T) {
@@ -370,8 +370,8 @@ func Test_diff(t *testing.T) {
 	runDiffTests(t, []diffTest{
 		{
 			name: "Create",
-			left: audit.Empty[database.Workspace](),
-			right: database.Workspace{
+			left: audit.Empty[database.WorkspaceTable](),
+			right: database.WorkspaceTable{
 				ID:                uuid.UUID{1},
 				CreatedAt:         time.Now(),
 				UpdatedAt:         time.Now(),
@@ -392,8 +392,8 @@ func Test_diff(t *testing.T) {
 		},
 		{
 			name: "NullSchedules",
-			left: audit.Empty[database.Workspace](),
-			right: database.Workspace{
+			left: audit.Empty[database.WorkspaceTable](),
+			right: database.WorkspaceTable{
 				ID:                uuid.UUID{1},
 				CreatedAt:         time.Now(),
 				UpdatedAt:         time.Now(),

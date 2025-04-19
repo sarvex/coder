@@ -12,14 +12,15 @@ import (
 	"golang.org/x/exp/maps"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/cliui"
-	"github.com/coder/coder/codersdk"
-	"github.com/coder/coder/examples"
-	"github.com/coder/coder/provisionersdk"
+	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/examples"
+	"github.com/coder/coder/v2/provisionersdk"
+	"github.com/coder/pretty"
+	"github.com/coder/serpent"
 )
 
-func (*RootCmd) templateInit() *clibase.Cmd {
+func (*RootCmd) templateInit() *serpent.Command {
 	var templateID string
 	exampleList, err := examples.List()
 	if err != nil {
@@ -31,28 +32,32 @@ func (*RootCmd) templateInit() *clibase.Cmd {
 		templateIDs = append(templateIDs, ex.ID)
 	}
 	sort.Strings(templateIDs)
-	cmd := &clibase.Cmd{
+	cmd := &serpent.Command{
 		Use:        "init [directory]",
 		Short:      "Get started with a templated template.",
-		Middleware: clibase.RequireRangeArgs(0, 1),
-		Handler: func(inv *clibase.Invocation) error {
+		Middleware: serpent.RequireRangeArgs(0, 1),
+		Handler: func(inv *serpent.Invocation) error {
 			// If the user didn't specify any template, prompt them to select one.
 			if templateID == "" {
 				optsToID := map[string]string{}
 				for _, example := range exampleList {
 					name := fmt.Sprintf(
 						"%s\n%s\n%s\n",
-						cliui.Styles.Bold.Render(example.Name),
-						cliui.Styles.Wrap.Copy().PaddingLeft(6).Render(example.Description),
-						cliui.Styles.Keyword.Copy().PaddingLeft(6).Render(example.URL),
+						cliui.Bold(example.Name),
+						pretty.Sprint(cliui.DefaultStyles.Wrap.With(pretty.XPad(6, 0)), example.Description),
+						pretty.Sprint(cliui.DefaultStyles.Keyword.With(pretty.XPad(6, 0)), example.URL),
 					)
 					optsToID[name] = example.ID
 				}
 				opts := maps.Keys(optsToID)
 				sort.Strings(opts)
-				_, _ = fmt.Fprintln(inv.Stdout, cliui.Styles.Wrap.Render(
-					"A template defines infrastructure as code to be provisioned "+
-						"for individual developer workspaces. Select an example to be copied to the active directory:\n"))
+				_, _ = fmt.Fprintln(
+					inv.Stdout,
+					pretty.Sprint(
+						cliui.DefaultStyles.Wrap,
+						"A template defines infrastructure as code to be provisioned "+
+							"for individual developer workspaces. Select an example to be copied to the active directory:\n"),
+				)
 				selected, err := cliui.Select(inv, cliui.SelectOptions{
 					Options: opts,
 				})
@@ -71,7 +76,7 @@ func (*RootCmd) templateInit() *clibase.Cmd {
 
 			selectedTemplate, ok := templateByID(templateID, exampleList)
 			if !ok {
-				// clibase.EnumOf would normally handle this.
+				// serpent.EnumOf would normally handle this.
 				return xerrors.Errorf("template not found: %q", templateID)
 			}
 			archive, err := examples.Archive(selectedTemplate.ID)
@@ -94,7 +99,7 @@ func (*RootCmd) templateInit() *clibase.Cmd {
 			} else {
 				relPath = "./" + relPath
 			}
-			_, _ = fmt.Fprintf(inv.Stdout, "Extracting %s to %s...\n", cliui.Styles.Field.Render(selectedTemplate.ID), relPath)
+			_, _ = fmt.Fprintf(inv.Stdout, "Extracting %s to %s...\n", pretty.Sprint(cliui.DefaultStyles.Field, selectedTemplate.ID), relPath)
 			err = os.MkdirAll(directory, 0o700)
 			if err != nil {
 				return err
@@ -104,17 +109,22 @@ func (*RootCmd) templateInit() *clibase.Cmd {
 				return err
 			}
 			_, _ = fmt.Fprintln(inv.Stdout, "Create your template by running:")
-			_, _ = fmt.Fprintln(inv.Stdout, cliui.Styles.Paragraph.Render(cliui.Styles.Code.Render("cd "+relPath+" && coder templates create"))+"\n")
-			_, _ = fmt.Fprintln(inv.Stdout, cliui.Styles.Wrap.Render("Examples provide a starting point and are expected to be edited! 🎨"))
+			_, _ = fmt.Fprintln(
+				inv.Stdout,
+				pretty.Sprint(
+					cliui.DefaultStyles.Code,
+					"cd "+relPath+" && coder templates push"),
+			)
+			_, _ = fmt.Fprintln(inv.Stdout, pretty.Sprint(cliui.DefaultStyles.Wrap, "\nExamples provide a starting point and are expected to be edited! 🎨"))
 			return nil
 		},
 	}
 
-	cmd.Options = clibase.OptionSet{
+	cmd.Options = serpent.OptionSet{
 		{
 			Flag:        "id",
 			Description: "Specify a given example template by ID.",
-			Value:       clibase.EnumOf(&templateID, templateIDs...),
+			Value:       serpent.EnumOf(&templateID, templateIDs...),
 		},
 	}
 

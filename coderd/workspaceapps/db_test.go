@@ -2,6 +2,8 @@ package workspaceapps_test
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -10,23 +12,29 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"cdr.dev/slog/sloggers/slogtest"
-	"github.com/coder/coder/agent"
-	"github.com/coder/coder/coderd/coderdtest"
-	"github.com/coder/coder/coderd/httpmw"
-	"github.com/coder/coder/coderd/workspaceapps"
-	"github.com/coder/coder/codersdk"
-	"github.com/coder/coder/codersdk/agentsdk"
-	"github.com/coder/coder/provisioner/echo"
-	"github.com/coder/coder/provisionersdk/proto"
-	"github.com/coder/coder/testutil"
+	"github.com/coder/coder/v2/agent/agenttest"
+	"github.com/coder/coder/v2/coderd/audit"
+	"github.com/coder/coder/v2/coderd/coderdtest"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbauthz"
+	"github.com/coder/coder/v2/coderd/httpmw"
+	"github.com/coder/coder/v2/coderd/jwtutils"
+	"github.com/coder/coder/v2/coderd/tracing"
+	"github.com/coder/coder/v2/coderd/workspaceapps"
+	"github.com/coder/coder/v2/coderd/workspaceapps/appurl"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/provisioner/echo"
+	"github.com/coder/coder/v2/provisionersdk/proto"
+	"github.com/coder/coder/v2/testutil"
 )
 
 func Test_ResolveRequest(t *testing.T) {
@@ -38,9 +46,13 @@ func Test_ResolveRequest(t *testing.T) {
 		appNameAuthed     = "app-authed"
 		appNamePublic     = "app-public"
 		appNameInvalidURL = "app-invalid-url"
-		appNameUnhealthy  = "app-unhealthy"
+		// Users can access unhealthy and initializing apps (as of 2024-02).
+		appNameUnhealthy    = "app-unhealthy"
+		appNameInitializing = "app-initializing"
+		appNameEndsInS      = "app-ends-in-s"
 
 		// This agent will never connect, so it will never become "connected".
+		// Users cannot access unhealthy agents.
 		agentNameUnhealthy    = "agent-unhealthy"
 		appNameAgentUnhealthy = "app-agent-unhealthy"
 
@@ -56,12 +68,28 @@ func Test_ResolveRequest(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("unhealthy"))
 	}))
+	t.Cleanup(unhealthySrv.Close)
+
+	// Start a listener for a server that never responds.
+	initializingServer, err := net.Listen("tcp", "localhost:0")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = initializingServer.Close()
+	})
+	initializingURL := fmt.Sprintf("http://%s", initializingServer.Addr().String())
 
 	deploymentValues := coderdtest.DeploymentValues(t)
 	deploymentValues.DisablePathApps = false
 	deploymentValues.Dangerous.AllowPathAppSharing = true
 	deploymentValues.Dangerous.AllowPathAppSiteOwnerAccess = true
 
+	auditor := audit.NewMock()
+	t.Cleanup(func() {
+		if t.Failed() {
+			return
+		}
+		assert.Len(t, auditor.AuditLogs(), 0, "one or more test cases produced unexpected audit logs, did you replace the auditor or forget to call ResetLogs?")
+	})
 	client, closer, api := coderdtest.NewWithAPI(t, &coderdtest.Options{
 		AppHostname:                 "*.test.coder.com",
 		DeploymentValues:            deploymentValues,
@@ -77,27 +105,27 @@ func Test_ResolveRequest(t *testing.T) {
 				"CF-Connecting-IP",
 			},
 		},
+		Auditor: auditor,
 	})
 	t.Cleanup(func() {
 		_ = closer.Close()
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitMedium)
-	defer cancel()
+	ctx := testutil.Context(t, testutil.WaitMedium)
 
 	firstUser := coderdtest.CreateFirstUser(t, client)
 	me, err := client.User(ctx, codersdk.Me)
 	require.NoError(t, err)
 
-	secondUserClient, _ := coderdtest.CreateAnotherUser(t, client, firstUser.OrganizationID)
+	secondUserClient, secondUser := coderdtest.CreateAnotherUser(t, client, firstUser.OrganizationID)
 
 	agentAuthToken := uuid.NewString()
 	version := coderdtest.CreateTemplateVersion(t, client, firstUser.OrganizationID, &echo.Responses{
 		Parse:         echo.ParseComplete,
-		ProvisionPlan: echo.ProvisionComplete,
-		ProvisionApply: []*proto.Provision_Response{{
-			Type: &proto.Provision_Response_Complete{
-				Complete: &proto.Provision_Complete{
+		ProvisionPlan: echo.PlanComplete,
+		ProvisionApply: []*proto.Response{{
+			Type: &proto.Response_Apply{
+				Apply: &proto.ApplyComplete{
 					Resources: []*proto.Resource{{
 						Name: "example",
 						Type: "aws_instance",
@@ -144,6 +172,23 @@ func Test_ResolveRequest(t *testing.T) {
 											Threshold: 1,
 										},
 									},
+									{
+										Slug:         appNameInitializing,
+										DisplayName:  appNameInitializing,
+										SharingLevel: proto.AppSharingLevel_PUBLIC,
+										Url:          appURL,
+										Healthcheck: &proto.Healthcheck{
+											Url:       initializingURL,
+											Interval:  30,
+											Threshold: 1000,
+										},
+									},
+									{
+										Slug:         appNameEndsInS,
+										DisplayName:  appNameEndsInS,
+										SharingLevel: proto.AppSharingLevel_OWNER,
+										Url:          appURL,
+									},
 								},
 							},
 							{
@@ -168,19 +213,11 @@ func Test_ResolveRequest(t *testing.T) {
 		}},
 	})
 	template := coderdtest.CreateTemplate(t, client, firstUser.OrganizationID, version.ID)
-	coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
-	workspace := coderdtest.CreateWorkspace(t, client, firstUser.OrganizationID, template.ID)
-	coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
+	coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
+	workspace := coderdtest.CreateWorkspace(t, client, template.ID)
+	coderdtest.AwaitWorkspaceBuildJobCompleted(t, client, workspace.LatestBuild.ID)
 
-	agentClient := agentsdk.New(client.URL)
-	agentClient.SetSessionToken(agentAuthToken)
-	agentCloser := agent.New(agent.Options{
-		Client: agentClient,
-		Logger: slogtest.Make(t, nil).Named("agent"),
-	})
-	t.Cleanup(func() {
-		_ = agentCloser.Close()
-	})
+	_ = agenttest.New(t, client.URL, agentAuthToken)
 	resources := coderdtest.AwaitWorkspaceAgents(t, client, workspace.ID, agentName)
 
 	agentID := uuid.Nil
@@ -188,10 +225,29 @@ func Test_ResolveRequest(t *testing.T) {
 		for _, agnt := range resource.Agents {
 			if agnt.Name == agentName {
 				agentID = agnt.ID
+				break
 			}
 		}
 	}
 	require.NotEqual(t, uuid.Nil, agentID)
+
+	//nolint:gocritic // This is a test, allow dbauthz.AsSystemRestricted.
+	agent, err := api.Database.GetWorkspaceAgentByID(dbauthz.AsSystemRestricted(ctx), agentID)
+	require.NoError(t, err)
+
+	//nolint:gocritic // This is a test, allow dbauthz.AsSystemRestricted.
+	apps, err := api.Database.GetWorkspaceAppsByAgentID(dbauthz.AsSystemRestricted(ctx), agentID)
+	require.NoError(t, err)
+	appsBySlug := make(map[string]database.WorkspaceApp, len(apps))
+	for _, app := range apps {
+		appsBySlug[app.Slug] = app
+	}
+
+	// Reset audit logs so cleanup check can pass.
+	auditor.ResetLogs()
+
+	assertAuditAgent := auditAsserter[database.WorkspaceAgent](workspace)
+	assertAuditApp := auditAsserter[database.WorkspaceApp](workspace)
 
 	t.Run("OK", func(t *testing.T) {
 		t.Parallel()
@@ -222,22 +278,28 @@ func Test_ResolveRequest(t *testing.T) {
 				// Try resolving a request for each app as the owner, without a
 				// token, then use the token to resolve each app.
 				for _, app := range allApps {
-					req := workspaceapps.Request{
+					req := (workspaceapps.Request{
 						AccessMethod:      workspaceapps.AccessMethodPath,
 						BasePath:          "/app",
 						UsernameOrID:      me.Username,
 						WorkspaceNameOrID: c.workspaceNameOrID,
 						AgentNameOrID:     c.agentNameOrID,
 						AppSlugOrPort:     app,
-					}
+					}).Normalize()
+
+					auditor := audit.NewMock()
+					auditableIP := testutil.RandomIPv6(t)
+					auditableUA := "Tidua"
 
 					t.Log("app", app)
 					rw := httptest.NewRecorder()
 					r := httptest.NewRequest("GET", "/app", nil)
 					r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+					r.RemoteAddr = auditableIP
+					r.Header.Set("User-Agent", auditableUA)
 
 					// Try resolving the request without a token.
-					token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+					token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 						Logger:              api.Logger,
 						SignedTokenProvider: api.WorkspaceAppsProvider,
 						DashboardURL:        api.AccessURL,
@@ -255,26 +317,32 @@ func Test_ResolveRequest(t *testing.T) {
 					_ = w.Body.Close()
 
 					require.Equal(t, &workspaceapps.SignedToken{
+						RegisteredClaims: jwtutils.RegisteredClaims{
+							Expiry: jwt.NewNumericDate(token.Expiry.Time()),
+						},
 						Request:     req,
-						Expiry:      token.Expiry, // ignored to avoid flakiness
 						UserID:      me.ID,
 						WorkspaceID: workspace.ID,
 						AgentID:     agentID,
 						AppURL:      appURL,
 					}, token)
 					require.NotZero(t, token.Expiry)
-					require.WithinDuration(t, time.Now().Add(workspaceapps.DefaultTokenExpiry), token.Expiry, time.Minute)
+					require.WithinDuration(t, time.Now().Add(workspaceapps.DefaultTokenExpiry), token.Expiry.Time(), time.Minute)
 
 					// Check that the token was set in the response and is valid.
 					require.Len(t, w.Cookies(), 1)
 					cookie := w.Cookies()[0]
-					require.Equal(t, codersdk.DevURLSignedAppTokenCookie, cookie.Name)
+					require.Equal(t, codersdk.SignedAppTokenCookie, cookie.Name)
 					require.Equal(t, req.BasePath, cookie.Path)
 
-					parsedToken, err := api.AppSecurityKey.VerifySignedToken(cookie.Value)
+					assertAuditApp(t, rw, r, auditor, appsBySlug[app], me.ID, nil)
+					require.Len(t, auditor.AuditLogs(), 1, "audit log count")
+
+					var parsedToken workspaceapps.SignedToken
+					err := jwtutils.Verify(ctx, api.AppSigningKeyCache, cookie.Value, &parsedToken)
 					require.NoError(t, err)
 					// normalize expiry
-					require.WithinDuration(t, token.Expiry, parsedToken.Expiry, 2*time.Second)
+					require.WithinDuration(t, token.Expiry.Time(), parsedToken.Expiry.Time(), 2*time.Second)
 					parsedToken.Expiry = token.Expiry
 					require.Equal(t, token, &parsedToken)
 
@@ -282,8 +350,9 @@ func Test_ResolveRequest(t *testing.T) {
 					rw = httptest.NewRecorder()
 					r = httptest.NewRequest("GET", "/app", nil)
 					r.AddCookie(cookie)
+					r.RemoteAddr = auditableIP
 
-					secondToken, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+					secondToken, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 						Logger:              api.Logger,
 						SignedTokenProvider: api.WorkspaceAppsProvider,
 						DashboardURL:        api.AccessURL,
@@ -293,9 +362,10 @@ func Test_ResolveRequest(t *testing.T) {
 					})
 					require.True(t, ok)
 					// normalize expiry
-					require.WithinDuration(t, token.Expiry, secondToken.Expiry, 2*time.Second)
+					require.WithinDuration(t, token.Expiry.Time(), secondToken.Expiry.Time(), 2*time.Second)
 					secondToken.Expiry = token.Expiry
 					require.Equal(t, token, secondToken)
+					require.Len(t, auditor.AuditLogs(), 1, "no new audit log, FromRequest returned the same token and is not audited")
 				}
 			})
 		}
@@ -305,21 +375,25 @@ func Test_ResolveRequest(t *testing.T) {
 		t.Parallel()
 
 		for _, app := range allApps {
-			req := workspaceapps.Request{
+			req := (workspaceapps.Request{
 				AccessMethod:      workspaceapps.AccessMethodPath,
 				BasePath:          "/app",
 				UsernameOrID:      me.Username,
 				WorkspaceNameOrID: workspace.Name,
 				AgentNameOrID:     agentName,
 				AppSlugOrPort:     app,
-			}
+			}).Normalize()
+
+			auditor := audit.NewMock()
+			auditableIP := testutil.RandomIPv6(t)
 
 			t.Log("app", app)
 			rw := httptest.NewRecorder()
 			r := httptest.NewRequest("GET", "/app", nil)
 			r.Header.Set(codersdk.SessionTokenHeader, secondUserClient.SessionToken())
+			r.RemoteAddr = auditableIP
 
-			token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+			token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 				Logger:              api.Logger,
 				SignedTokenProvider: api.WorkspaceAppsProvider,
 				DashboardURL:        api.AccessURL,
@@ -339,6 +413,9 @@ func Test_ResolveRequest(t *testing.T) {
 			require.True(t, ok)
 			require.NotNil(t, token)
 			require.Zero(t, w.StatusCode)
+
+			assertAuditApp(t, rw, r, auditor, appsBySlug[app], secondUser.ID, nil)
+			require.Len(t, auditor.AuditLogs(), 1, "single audit log")
 		}
 	})
 
@@ -346,19 +423,23 @@ func Test_ResolveRequest(t *testing.T) {
 		t.Parallel()
 
 		for _, app := range allApps {
-			req := workspaceapps.Request{
+			req := (workspaceapps.Request{
 				AccessMethod:      workspaceapps.AccessMethodPath,
 				BasePath:          "/app",
 				UsernameOrID:      me.Username,
 				WorkspaceNameOrID: workspace.Name,
 				AgentNameOrID:     agentName,
 				AppSlugOrPort:     app,
-			}
+			}).Normalize()
+
+			auditor := audit.NewMock()
+			auditableIP := testutil.RandomIPv6(t)
 
 			t.Log("app", app)
 			rw := httptest.NewRecorder()
 			r := httptest.NewRequest("GET", "/app", nil)
-			token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+			r.RemoteAddr = auditableIP
+			token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 				Logger:              api.Logger,
 				SignedTokenProvider: api.WorkspaceAppsProvider,
 				DashboardURL:        api.AccessURL,
@@ -372,6 +453,9 @@ func Test_ResolveRequest(t *testing.T) {
 				require.Nil(t, token)
 				require.NotZero(t, rw.Code)
 				require.NotEqual(t, http.StatusOK, rw.Code)
+
+				assertAuditApp(t, rw, r, auditor, appsBySlug[app], uuid.Nil, nil)
+				require.Len(t, auditor.AuditLogs(), 1, "audit log for unauthenticated requests")
 			} else {
 				if !assert.True(t, ok) {
 					dump, err := httputil.DumpResponse(w, true)
@@ -383,6 +467,9 @@ func Test_ResolveRequest(t *testing.T) {
 				if rw.Code != 0 && rw.Code != http.StatusOK {
 					t.Fatalf("expected 200 (or unset) response code, got %d", rw.Code)
 				}
+
+				assertAuditApp(t, rw, r, auditor, appsBySlug[app], uuid.Nil, nil)
+				require.Len(t, auditor.AuditLogs(), 1, "single audit log")
 			}
 			_ = w.Body.Close()
 		}
@@ -391,12 +478,15 @@ func Test_ResolveRequest(t *testing.T) {
 	t.Run("Invalid", func(t *testing.T) {
 		t.Parallel()
 
-		req := workspaceapps.Request{
+		req := (workspaceapps.Request{
 			AccessMethod: "invalid",
-		}
+		}).Normalize()
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
 		rw := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/app", nil)
-		token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+		r.RemoteAddr = auditableIP
+		token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 			Logger:              api.Logger,
 			SignedTokenProvider: api.WorkspaceAppsProvider,
 			DashboardURL:        api.AccessURL,
@@ -406,6 +496,7 @@ func Test_ResolveRequest(t *testing.T) {
 		})
 		require.False(t, ok)
 		require.Nil(t, token)
+		require.Len(t, auditor.AuditLogs(), 0, "no audit logs for invalid requests")
 	})
 
 	t.Run("SplitWorkspaceAndAgent", func(t *testing.T) {
@@ -465,19 +556,23 @@ func Test_ResolveRequest(t *testing.T) {
 
 		for _, c := range cases {
 			t.Run(c.name, func(t *testing.T) {
-				req := workspaceapps.Request{
+				req := (workspaceapps.Request{
 					AccessMethod:      workspaceapps.AccessMethodPath,
 					BasePath:          "/app",
 					UsernameOrID:      me.Username,
 					WorkspaceAndAgent: c.workspaceAndAgent,
 					AppSlugOrPort:     appNamePublic,
-				}
+				}).Normalize()
+
+				auditor := audit.NewMock()
+				auditableIP := testutil.RandomIPv6(t)
 
 				rw := httptest.NewRecorder()
 				r := httptest.NewRequest("GET", "/app", nil)
 				r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+				r.RemoteAddr = auditableIP
 
-				token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+				token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 					Logger:              api.Logger,
 					SignedTokenProvider: api.WorkspaceAppsProvider,
 					DashboardURL:        api.AccessURL,
@@ -498,8 +593,11 @@ func Test_ResolveRequest(t *testing.T) {
 					require.Equal(t, token.AgentNameOrID, c.agent)
 					require.Equal(t, token.WorkspaceID, workspace.ID)
 					require.Equal(t, token.AgentID, agentID)
+					assertAuditApp(t, rw, r, auditor, appsBySlug[token.AppSlugOrPort], me.ID, nil)
+					require.Len(t, auditor.AuditLogs(), 1, "single audit log")
 				} else {
 					require.Nil(t, token)
+					require.Len(t, auditor.AuditLogs(), 0, "no audit logs")
 				}
 				_ = w.Body.Close()
 			})
@@ -510,7 +608,7 @@ func Test_ResolveRequest(t *testing.T) {
 		t.Parallel()
 
 		badToken := workspaceapps.SignedToken{
-			Request: workspaceapps.Request{
+			Request: (workspaceapps.Request{
 				AccessMethod:      workspaceapps.AccessMethodPath,
 				BasePath:          "/app",
 				UsernameOrID:      me.Username,
@@ -518,17 +616,20 @@ func Test_ResolveRequest(t *testing.T) {
 				AgentNameOrID:     agentName,
 				// App name differs
 				AppSlugOrPort: appNamePublic,
+			}).Normalize(),
+			RegisteredClaims: jwtutils.RegisteredClaims{
+				Expiry: jwt.NewNumericDate(time.Now().Add(time.Minute)),
 			},
-			Expiry:      time.Now().Add(time.Minute),
 			UserID:      me.ID,
 			WorkspaceID: workspace.ID,
 			AgentID:     agentID,
 			AppURL:      appURL,
 		}
-		badTokenStr, err := api.AppSecurityKey.SignToken(badToken)
+
+		badTokenStr, err := jwtutils.Sign(ctx, api.AppSigningKeyCache, badToken)
 		require.NoError(t, err)
 
-		req := workspaceapps.Request{
+		req := (workspaceapps.Request{
 			AccessMethod:      workspaceapps.AccessMethodPath,
 			BasePath:          "/app",
 			UsernameOrID:      me.Username,
@@ -536,19 +637,23 @@ func Test_ResolveRequest(t *testing.T) {
 			AgentNameOrID:     agentName,
 			// App name differs
 			AppSlugOrPort: appNameOwner,
-		}
+		}).Normalize()
+
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
 
 		rw := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/app", nil)
 		r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
 		r.AddCookie(&http.Cookie{
-			Name:  codersdk.DevURLSignedAppTokenCookie,
+			Name:  codersdk.SignedAppTokenCookie,
 			Value: badTokenStr,
 		})
+		r.RemoteAddr = auditableIP
 
 		// Even though the token is invalid, we should still perform request
 		// resolution without failure since we'll just ignore the bad token.
-		token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+		token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 			Logger:              api.Logger,
 			SignedTokenProvider: api.WorkspaceAppsProvider,
 			DashboardURL:        api.AccessURL,
@@ -566,30 +671,38 @@ func Test_ResolveRequest(t *testing.T) {
 		_ = w.Body.Close()
 		cookies := w.Cookies()
 		require.Len(t, cookies, 1)
-		require.Equal(t, cookies[0].Name, codersdk.DevURLSignedAppTokenCookie)
+		require.Equal(t, cookies[0].Name, codersdk.SignedAppTokenCookie)
 		require.NotEqual(t, cookies[0].Value, badTokenStr)
-		parsedToken, err := api.AppSecurityKey.VerifySignedToken(cookies[0].Value)
+		var parsedToken workspaceapps.SignedToken
+		err = jwtutils.Verify(ctx, api.AppSigningKeyCache, cookies[0].Value, &parsedToken)
 		require.NoError(t, err)
 		require.Equal(t, appNameOwner, parsedToken.AppSlugOrPort)
+
+		assertAuditApp(t, rw, r, auditor, appsBySlug[appNameOwner], me.ID, nil)
+		require.Len(t, auditor.AuditLogs(), 1, "single audit log")
 	})
 
 	t.Run("PortPathBlocked", func(t *testing.T) {
 		t.Parallel()
 
-		req := workspaceapps.Request{
+		req := (workspaceapps.Request{
 			AccessMethod:      workspaceapps.AccessMethodPath,
 			BasePath:          "/app",
 			UsernameOrID:      me.Username,
 			WorkspaceNameOrID: workspace.Name,
 			AgentNameOrID:     agentName,
 			AppSlugOrPort:     "8080",
-		}
+		}).Normalize()
+
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
 
 		rw := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/app", nil)
 		r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+		r.RemoteAddr = auditableIP
 
-		token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+		token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 			Logger:              api.Logger,
 			SignedTokenProvider: api.WorkspaceAppsProvider,
 			DashboardURL:        api.AccessURL,
@@ -599,25 +712,35 @@ func Test_ResolveRequest(t *testing.T) {
 		})
 		require.False(t, ok)
 		require.Nil(t, token)
+
+		w := rw.Result()
+		_ = w.Body.Close()
+		// TODO(mafredri): Verify this is the correct status code.
+		require.Equal(t, http.StatusInternalServerError, w.StatusCode)
+		require.Len(t, auditor.AuditLogs(), 0, "no audit logs for port path blocked requests")
 	})
 
 	t.Run("PortSubdomain", func(t *testing.T) {
 		t.Parallel()
 
-		req := workspaceapps.Request{
+		req := (workspaceapps.Request{
 			AccessMethod:      workspaceapps.AccessMethodSubdomain,
 			BasePath:          "/",
 			UsernameOrID:      me.Username,
 			WorkspaceNameOrID: workspace.Name,
 			AgentNameOrID:     agentName,
 			AppSlugOrPort:     "9090",
-		}
+		}).Normalize()
+
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
 
 		rw := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+		r.RemoteAddr = auditableIP
 
-		token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+		token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 			Logger:              api.Logger,
 			SignedTokenProvider: api.WorkspaceAppsProvider,
 			DashboardURL:        api.AccessURL,
@@ -628,22 +751,104 @@ func Test_ResolveRequest(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, req.AppSlugOrPort, token.AppSlugOrPort)
 		require.Equal(t, "http://127.0.0.1:9090", token.AppURL)
+
+		assertAuditAgent(t, rw, r, auditor, agent, me.ID, map[string]any{
+			"slug_or_port": "9090",
+		})
+		require.Len(t, auditor.AuditLogs(), 1, "single audit log")
+	})
+
+	t.Run("PortSubdomainHTTPSS", func(t *testing.T) {
+		t.Parallel()
+
+		req := (workspaceapps.Request{
+			AccessMethod:      workspaceapps.AccessMethodSubdomain,
+			BasePath:          "/",
+			UsernameOrID:      me.Username,
+			WorkspaceNameOrID: workspace.Name,
+			AgentNameOrID:     agentName,
+			AppSlugOrPort:     "9090ss",
+		}).Normalize()
+
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
+
+		rw := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+		r.RemoteAddr = auditableIP
+
+		_, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
+			Logger:              api.Logger,
+			SignedTokenProvider: api.WorkspaceAppsProvider,
+			DashboardURL:        api.AccessURL,
+			PathAppBaseURL:      api.AccessURL,
+			AppHostname:         api.AppHostname,
+			AppRequest:          req,
+		})
+		// should parse as app and fail to find app "9090ss"
+		require.False(t, ok)
+		w := rw.Result()
+		_ = w.Body.Close()
+		b, err := io.ReadAll(w.Body)
+		require.NoError(t, err)
+		require.Contains(t, string(b), "404 - Application Not Found")
+		require.Equal(t, http.StatusNotFound, w.StatusCode)
+		require.Len(t, auditor.AuditLogs(), 0, "no audit logs for invalid requests")
+	})
+
+	t.Run("SubdomainEndsInS", func(t *testing.T) {
+		t.Parallel()
+
+		req := (workspaceapps.Request{
+			AccessMethod:      workspaceapps.AccessMethodSubdomain,
+			BasePath:          "/",
+			UsernameOrID:      me.Username,
+			WorkspaceNameOrID: workspace.Name,
+			AgentNameOrID:     agentName,
+			AppSlugOrPort:     appNameEndsInS,
+		}).Normalize()
+
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
+
+		rw := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+		r.RemoteAddr = auditableIP
+
+		token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
+			Logger:              api.Logger,
+			SignedTokenProvider: api.WorkspaceAppsProvider,
+			DashboardURL:        api.AccessURL,
+			PathAppBaseURL:      api.AccessURL,
+			AppHostname:         api.AppHostname,
+			AppRequest:          req,
+		})
+		require.True(t, ok)
+		require.Equal(t, req.AppSlugOrPort, token.AppSlugOrPort)
+		assertAuditApp(t, rw, r, auditor, appsBySlug[appNameEndsInS], me.ID, nil)
+		require.Len(t, auditor.AuditLogs(), 1, "single audit log")
 	})
 
 	t.Run("Terminal", func(t *testing.T) {
 		t.Parallel()
 
-		req := workspaceapps.Request{
+		req := (workspaceapps.Request{
 			AccessMethod:  workspaceapps.AccessMethodTerminal,
 			BasePath:      "/app",
 			AgentNameOrID: agentID.String(),
-		}
+		}).Normalize()
+
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
 
 		rw := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/app", nil)
 		r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+		r.RemoteAddr = auditableIP
 
-		token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+		token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 			Logger:              api.Logger,
 			SignedTokenProvider: api.WorkspaceAppsProvider,
 			DashboardURL:        api.AccessURL,
@@ -659,25 +864,33 @@ func Test_ResolveRequest(t *testing.T) {
 		require.Equal(t, req.AgentNameOrID, token.Request.AgentNameOrID)
 		require.Empty(t, token.AppSlugOrPort)
 		require.Empty(t, token.AppURL)
+		assertAuditAgent(t, rw, r, auditor, agent, me.ID, map[string]any{
+			"slug_or_port": "terminal",
+		})
+		require.Len(t, auditor.AuditLogs(), 1, "single audit log")
 	})
 
 	t.Run("InsufficientPermissions", func(t *testing.T) {
 		t.Parallel()
 
-		req := workspaceapps.Request{
+		req := (workspaceapps.Request{
 			AccessMethod:      workspaceapps.AccessMethodPath,
 			BasePath:          "/app",
 			UsernameOrID:      me.Username,
 			WorkspaceNameOrID: workspace.Name,
 			AgentNameOrID:     agentName,
 			AppSlugOrPort:     appNameOwner,
-		}
+		}).Normalize()
+
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
 
 		rw := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/app", nil)
 		r.Header.Set(codersdk.SessionTokenHeader, secondUserClient.SessionToken())
+		r.RemoteAddr = auditableIP
 
-		token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+		token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 			Logger:              api.Logger,
 			SignedTokenProvider: api.WorkspaceAppsProvider,
 			DashboardURL:        api.AccessURL,
@@ -687,24 +900,30 @@ func Test_ResolveRequest(t *testing.T) {
 		})
 		require.False(t, ok)
 		require.Nil(t, token)
+		assertAuditApp(t, rw, r, auditor, appsBySlug[appNameOwner], secondUser.ID, nil)
+		require.Len(t, auditor.AuditLogs(), 1, "single audit log")
 	})
 
 	t.Run("UserNotFound", func(t *testing.T) {
 		t.Parallel()
-		req := workspaceapps.Request{
+		req := (workspaceapps.Request{
 			AccessMethod:      workspaceapps.AccessMethodPath,
 			BasePath:          "/app",
 			UsernameOrID:      "thisuserdoesnotexist",
 			WorkspaceNameOrID: workspace.Name,
 			AgentNameOrID:     agentName,
 			AppSlugOrPort:     appNameOwner,
-		}
+		}).Normalize()
+
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
 
 		rw := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/app", nil)
 		r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+		r.RemoteAddr = auditableIP
 
-		token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+		token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 			Logger:              api.Logger,
 			SignedTokenProvider: api.WorkspaceAppsProvider,
 			DashboardURL:        api.AccessURL,
@@ -714,26 +933,31 @@ func Test_ResolveRequest(t *testing.T) {
 		})
 		require.False(t, ok)
 		require.Nil(t, token)
+		require.Len(t, auditor.AuditLogs(), 0, "no audit logs for user not found")
 	})
 
 	t.Run("RedirectSubdomainAuth", func(t *testing.T) {
 		t.Parallel()
 
-		req := workspaceapps.Request{
+		req := (workspaceapps.Request{
 			AccessMethod:      workspaceapps.AccessMethodSubdomain,
 			BasePath:          "/",
 			UsernameOrID:      me.Username,
 			WorkspaceNameOrID: workspace.Name,
 			AgentNameOrID:     agentName,
 			AppSlugOrPort:     appNameOwner,
-		}
+		}).Normalize()
+
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
 
 		rw := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/some-path", nil)
 		// Should not be used as the hostname in the redirect URI.
 		r.Host = "app.com"
+		r.RemoteAddr = auditableIP
 
-		token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+		token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 			Logger:              api.Logger,
 			SignedTokenProvider: api.WorkspaceAppsProvider,
 			DashboardURL:        api.AccessURL,
@@ -748,6 +972,10 @@ func Test_ResolveRequest(t *testing.T) {
 		w := rw.Result()
 		defer w.Body.Close()
 		require.Equal(t, http.StatusSeeOther, w.StatusCode)
+		// Note that we don't capture the owner UUID here because the apiKey
+		// check/authorization exits early.
+		assertAuditApp(t, rw, r, auditor, appsBySlug[appNameOwner], uuid.Nil, nil)
+		require.Len(t, auditor.AuditLogs(), 1, "autit log entry for redirect")
 
 		loc, err := w.Location()
 		require.NoError(t, err)
@@ -760,8 +988,14 @@ func Test_ResolveRequest(t *testing.T) {
 		redirectURI, err := url.Parse(redirectURIStr)
 		require.NoError(t, err)
 
-		appHost := fmt.Sprintf("%s--%s--%s--%s", req.AppSlugOrPort, req.AgentNameOrID, req.WorkspaceNameOrID, req.UsernameOrID)
-		host := strings.Replace(api.AppHostname, "*", appHost, 1)
+		appHost := appurl.ApplicationURL{
+			Prefix:        "",
+			AppSlugOrPort: req.AppSlugOrPort,
+			AgentName:     req.AgentNameOrID,
+			WorkspaceName: req.WorkspaceNameOrID,
+			Username:      req.UsernameOrID,
+		}
+		host := strings.Replace(api.AppHostname, "*", appHost.String(), 1)
 
 		require.Equal(t, "http", redirectURI.Scheme)
 		require.Equal(t, host, redirectURI.Host)
@@ -771,20 +1005,24 @@ func Test_ResolveRequest(t *testing.T) {
 	t.Run("UnhealthyAgent", func(t *testing.T) {
 		t.Parallel()
 
-		req := workspaceapps.Request{
+		req := (workspaceapps.Request{
 			AccessMethod:      workspaceapps.AccessMethodPath,
 			BasePath:          "/app",
 			UsernameOrID:      me.Username,
 			WorkspaceNameOrID: workspace.Name,
 			AgentNameOrID:     agentNameUnhealthy,
 			AppSlugOrPort:     appNameAgentUnhealthy,
-		}
+		}).Normalize()
+
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
 
 		rw := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/app", nil)
 		r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+		r.RemoteAddr = auditableIP
 
-		token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+		token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 			Logger:              api.Logger,
 			SignedTokenProvider: api.WorkspaceAppsProvider,
 			DashboardURL:        api.AccessURL,
@@ -798,6 +1036,8 @@ func Test_ResolveRequest(t *testing.T) {
 		w := rw.Result()
 		defer w.Body.Close()
 		require.Equal(t, http.StatusBadGateway, w.StatusCode)
+		assertAuditApp(t, rw, r, auditor, appsBySlug[appNameAgentUnhealthy], me.ID, nil)
+		require.Len(t, auditor.AuditLogs(), 1, "single audit log")
 
 		body, err := io.ReadAll(w.Body)
 		require.NoError(t, err)
@@ -808,7 +1048,61 @@ func Test_ResolveRequest(t *testing.T) {
 		require.Contains(t, bodyStr, `Agent state is "`)
 	})
 
-	t.Run("UnhealthyApp", func(t *testing.T) {
+	// Initializing apps are now permitted to connect anyways. This wasn't
+	// always the case, but we're testing the behavior to ensure it doesn't
+	// change back accidentally.
+	t.Run("InitializingAppPermitted", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitShort)
+		defer cancel()
+
+		agent, err := client.WorkspaceAgent(ctx, agentID)
+		require.NoError(t, err)
+
+		for _, app := range agent.Apps {
+			if app.Slug == appNameInitializing {
+				t.Log("app is", app.Health)
+				require.Equal(t, codersdk.WorkspaceAppHealthInitializing, app.Health)
+				break
+			}
+		}
+
+		req := (workspaceapps.Request{
+			AccessMethod:      workspaceapps.AccessMethodPath,
+			BasePath:          "/app",
+			UsernameOrID:      me.Username,
+			WorkspaceNameOrID: workspace.Name,
+			AgentNameOrID:     agentName,
+			AppSlugOrPort:     appNameInitializing,
+		}).Normalize()
+
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
+
+		rw := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/app", nil)
+		r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+		r.RemoteAddr = auditableIP
+
+		token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
+			Logger:              api.Logger,
+			SignedTokenProvider: api.WorkspaceAppsProvider,
+			DashboardURL:        api.AccessURL,
+			PathAppBaseURL:      api.AccessURL,
+			AppHostname:         api.AppHostname,
+			AppRequest:          req,
+		})
+		require.True(t, ok, "ResolveRequest failed, should pass even though app is initializing")
+		require.NotNil(t, token)
+		assertAuditApp(t, rw, r, auditor, appsBySlug[token.AppSlugOrPort], me.ID, nil)
+		require.Len(t, auditor.AuditLogs(), 1, "single audit log")
+	})
+
+	// Unhealthy apps are now permitted to connect anyways. This wasn't always
+	// the case, but we're testing the behavior to ensure it doesn't change back
+	// accidentally.
+	t.Run("UnhealthyAppPermitted", func(t *testing.T) {
 		t.Parallel()
 
 		require.Eventually(t, func() bool {
@@ -832,20 +1126,24 @@ func Test_ResolveRequest(t *testing.T) {
 			return false
 		}, testutil.WaitLong, testutil.IntervalFast, "wait for app to become unhealthy")
 
-		req := workspaceapps.Request{
+		req := (workspaceapps.Request{
 			AccessMethod:      workspaceapps.AccessMethodPath,
 			BasePath:          "/app",
 			UsernameOrID:      me.Username,
 			WorkspaceNameOrID: workspace.Name,
 			AgentNameOrID:     agentName,
 			AppSlugOrPort:     appNameUnhealthy,
-		}
+		}).Normalize()
+
+		auditor := audit.NewMock()
+		auditableIP := testutil.RandomIPv6(t)
 
 		rw := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/app", nil)
 		r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+		r.RemoteAddr = auditableIP
 
-		token, ok := workspaceapps.ResolveRequest(rw, r, workspaceapps.ResolveRequestOptions{
+		token, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
 			Logger:              api.Logger,
 			SignedTokenProvider: api.WorkspaceAppsProvider,
 			DashboardURL:        api.AccessURL,
@@ -853,17 +1151,167 @@ func Test_ResolveRequest(t *testing.T) {
 			AppHostname:         api.AppHostname,
 			AppRequest:          req,
 		})
-		require.False(t, ok, "request succeeded even though app is unhealthy")
-		require.Nil(t, token)
-
-		w := rw.Result()
-		defer w.Body.Close()
-		require.Equal(t, http.StatusBadGateway, w.StatusCode)
-
-		body, err := io.ReadAll(w.Body)
-		require.NoError(t, err)
-		bodyStr := string(body)
-		bodyStr = strings.ReplaceAll(bodyStr, "&#34;", `"`)
-		require.Contains(t, bodyStr, `App health is "unhealthy"`)
+		require.True(t, ok, "ResolveRequest failed, should pass even though app is unhealthy")
+		require.NotNil(t, token)
+		assertAuditApp(t, rw, r, auditor, appsBySlug[token.AppSlugOrPort], me.ID, nil)
+		require.Len(t, auditor.AuditLogs(), 1, "single audit log")
 	})
+
+	t.Run("AuditLogging", func(t *testing.T) {
+		t.Parallel()
+
+		for _, app := range allApps {
+			req := (workspaceapps.Request{
+				AccessMethod:      workspaceapps.AccessMethodPath,
+				BasePath:          "/app",
+				UsernameOrID:      me.Username,
+				WorkspaceNameOrID: workspace.Name,
+				AgentNameOrID:     agentName,
+				AppSlugOrPort:     app,
+			}).Normalize()
+
+			auditor := audit.NewMock()
+			auditableIP := testutil.RandomIPv6(t)
+
+			t.Log("app", app)
+
+			// First request, new audit log.
+			rw := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", "/app", nil)
+			r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+			r.RemoteAddr = auditableIP
+
+			_, ok := workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
+				Logger:              api.Logger,
+				SignedTokenProvider: api.WorkspaceAppsProvider,
+				DashboardURL:        api.AccessURL,
+				PathAppBaseURL:      api.AccessURL,
+				AppHostname:         api.AppHostname,
+				AppRequest:          req,
+			})
+			require.True(t, ok)
+			assertAuditApp(t, rw, r, auditor, appsBySlug[app], me.ID, nil)
+			require.Len(t, auditor.AuditLogs(), 1, "single audit log")
+
+			// Second request, no audit log because the session is active.
+			rw = httptest.NewRecorder()
+			r = httptest.NewRequest("GET", "/app", nil)
+			r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+			r.RemoteAddr = auditableIP
+
+			_, ok = workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
+				Logger:              api.Logger,
+				SignedTokenProvider: api.WorkspaceAppsProvider,
+				DashboardURL:        api.AccessURL,
+				PathAppBaseURL:      api.AccessURL,
+				AppHostname:         api.AppHostname,
+				AppRequest:          req,
+			})
+			require.True(t, ok)
+			require.Len(t, auditor.AuditLogs(), 1, "single audit log, previous session active")
+
+			// Third request, session timed out, new audit log.
+			rw = httptest.NewRecorder()
+			r = httptest.NewRequest("GET", "/app", nil)
+			r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+			r.RemoteAddr = auditableIP
+
+			sessionTimeoutTokenProvider := signedTokenProviderWithAuditor(t, api.WorkspaceAppsProvider, auditor, 0)
+			_, ok = workspaceappsResolveRequest(t, nil, rw, r, workspaceapps.ResolveRequestOptions{
+				Logger:              api.Logger,
+				SignedTokenProvider: sessionTimeoutTokenProvider,
+				DashboardURL:        api.AccessURL,
+				PathAppBaseURL:      api.AccessURL,
+				AppHostname:         api.AppHostname,
+				AppRequest:          req,
+			})
+			require.True(t, ok)
+			assertAuditApp(t, rw, r, auditor, appsBySlug[app], me.ID, nil)
+			require.Len(t, auditor.AuditLogs(), 2, "two audit logs, session timed out")
+
+			// Fourth request, new IP produces new audit log.
+			auditableIP = testutil.RandomIPv6(t)
+			rw = httptest.NewRecorder()
+			r = httptest.NewRequest("GET", "/app", nil)
+			r.Header.Set(codersdk.SessionTokenHeader, client.SessionToken())
+			r.RemoteAddr = auditableIP
+
+			_, ok = workspaceappsResolveRequest(t, auditor, rw, r, workspaceapps.ResolveRequestOptions{
+				Logger:              api.Logger,
+				SignedTokenProvider: api.WorkspaceAppsProvider,
+				DashboardURL:        api.AccessURL,
+				PathAppBaseURL:      api.AccessURL,
+				AppHostname:         api.AppHostname,
+				AppRequest:          req,
+			})
+			require.True(t, ok)
+			assertAuditApp(t, rw, r, auditor, appsBySlug[app], me.ID, nil)
+			require.Len(t, auditor.AuditLogs(), 3, "three audit logs, new IP")
+		}
+	})
+}
+
+func workspaceappsResolveRequest(t testing.TB, auditor audit.Auditor, w http.ResponseWriter, r *http.Request, opts workspaceapps.ResolveRequestOptions) (token *workspaceapps.SignedToken, ok bool) {
+	t.Helper()
+	if opts.SignedTokenProvider != nil && auditor != nil {
+		opts.SignedTokenProvider = signedTokenProviderWithAuditor(t, opts.SignedTokenProvider, auditor, time.Hour)
+	}
+
+	tracing.StatusWriterMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpmw.AttachRequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token, ok = workspaceapps.ResolveRequest(w, r, opts)
+		})).ServeHTTP(w, r)
+	})).ServeHTTP(w, r)
+
+	return token, ok
+}
+
+func signedTokenProviderWithAuditor(t testing.TB, provider workspaceapps.SignedTokenProvider, auditor audit.Auditor, sessionTimeout time.Duration) workspaceapps.SignedTokenProvider {
+	t.Helper()
+	p, ok := provider.(*workspaceapps.DBTokenProvider)
+	require.True(t, ok, "provider is not a DBTokenProvider")
+
+	shallowCopy := *p
+	shallowCopy.Auditor = &atomic.Pointer[audit.Auditor]{}
+	shallowCopy.Auditor.Store(&auditor)
+	shallowCopy.WorkspaceAppAuditSessionTimeout = sessionTimeout
+	return &shallowCopy
+}
+
+func auditAsserter[T audit.Auditable](workspace codersdk.Workspace) func(t testing.TB, rr *httptest.ResponseRecorder, r *http.Request, auditor *audit.MockAuditor, auditable T, userID uuid.UUID, additionalFields map[string]any) {
+	return func(t testing.TB, rr *httptest.ResponseRecorder, r *http.Request, auditor *audit.MockAuditor, auditable T, userID uuid.UUID, additionalFields map[string]any) {
+		t.Helper()
+
+		resp := rr.Result()
+		defer resp.Body.Close()
+
+		require.True(t, auditor.Contains(t, database.AuditLog{
+			OrganizationID: workspace.OrganizationID,
+			Action:         database.AuditActionOpen,
+			ResourceType:   audit.ResourceType(auditable),
+			ResourceID:     audit.ResourceID(auditable),
+			ResourceTarget: audit.ResourceTarget(auditable),
+			UserID:         userID,
+			Ip:             audit.ParseIP(r.RemoteAddr),
+			UserAgent:      sql.NullString{Valid: r.UserAgent() != "", String: r.UserAgent()},
+			StatusCode:     int32(resp.StatusCode), //nolint:gosec
+		}), "audit log")
+
+		// Verify additional fields, assume the last log entry.
+		alog := auditor.AuditLogs()[len(auditor.AuditLogs())-1]
+
+		// Contains does not verify uuid.Nil.
+		if userID == uuid.Nil {
+			require.Equal(t, uuid.Nil, alog.UserID, "unauthenticated user")
+		}
+
+		add := make(map[string]any)
+		if len(alog.AdditionalFields) > 0 {
+			err := json.Unmarshal([]byte(alog.AdditionalFields), &add)
+			require.NoError(t, err, "audit log unmarhsal additional fields")
+		}
+		for k, v := range additionalFields {
+			require.Equal(t, v, add[k], "audit log additional field %s: additional fields: %v", k, add)
+		}
+	}
 }

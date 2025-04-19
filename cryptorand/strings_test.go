@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/cryptorand"
+	"github.com/coder/coder/v2/cryptorand"
 )
 
 func TestString(t *testing.T) {
@@ -160,7 +160,7 @@ func BenchmarkStringUnsafe20(b *testing.B) {
 
 		for i := 0; i < size; i++ {
 			n := binary.BigEndian.Uint32(ibuf[i*4 : (i+1)*4])
-			_, _ = buf.WriteRune(charSet[n%uint32(len(charSet))])
+			_, _ = buf.WriteRune(charSet[n%uint32(len(charSet))]) // #nosec G115 - Safe conversion as len(charSet) will be reasonably small for character sets
 		}
 
 		return buf.String(), nil

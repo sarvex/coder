@@ -8,21 +8,26 @@ import (
 	"github.com/fatih/color"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/cliui"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/pretty"
+
+	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/serpent"
 )
 
-func (r *RootCmd) workspaceProxy() *clibase.Cmd {
-	cmd := &clibase.Cmd{
-		Use:     "workspace-proxy",
-		Short:   "Manage workspace proxies",
+func (r *RootCmd) workspaceProxy() *serpent.Command {
+	cmd := &serpent.Command{
+		Use:   "workspace-proxy",
+		Short: "Workspace proxies provide low-latency experiences for geo-distributed teams.",
+		Long: "Workspace proxies provide low-latency experiences for geo-distributed teams. " +
+			"It will act as a connection gateway to your workspace. " +
+			"Best used if Coder and your workspace are deployed in different regions.",
 		Aliases: []string{"wsproxy"},
 		Hidden:  true,
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			return inv.Command.HelpHandler(inv)
 		},
-		Children: []*clibase.Cmd{
+		Children: []*serpent.Command{
 			r.proxyServer(),
 			r.createProxy(),
 			r.deleteProxy(),
@@ -35,19 +40,20 @@ func (r *RootCmd) workspaceProxy() *clibase.Cmd {
 	return cmd
 }
 
-func (r *RootCmd) regenerateProxyToken() *clibase.Cmd {
+func (r *RootCmd) regenerateProxyToken() *serpent.Command {
 	formatter := newUpdateProxyResponseFormatter()
 	client := new(codersdk.Client)
-	cmd := &clibase.Cmd{
+	cmd := &serpent.Command{
 		Use: "regenerate-token <name|id>",
 		Short: "Regenerate a workspace proxy authentication token. " +
 			"This will invalidate the existing authentication token.",
-		Middleware: clibase.Chain(
-			clibase.RequireNArgs(1),
+		Middleware: serpent.Chain(
+			serpent.RequireNArgs(1),
 			r.InitClient(client),
 		),
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			ctx := inv.Context()
+			formatter.primaryAccessURL = client.URL.String()
 			// This is cheeky, but you can also use a uuid string in
 			// 'DeleteWorkspaceProxyByName' and it will work.
 			proxy, err := client.WorkspaceProxyByName(ctx, inv.Args[0])
@@ -60,7 +66,7 @@ func (r *RootCmd) regenerateProxyToken() *clibase.Cmd {
 				ID:              proxy.ID,
 				Name:            proxy.Name,
 				DisplayName:     proxy.DisplayName,
-				Icon:            proxy.Icon,
+				Icon:            proxy.IconURL,
 				RegenerateToken: true,
 			})
 			if err != nil {
@@ -80,7 +86,7 @@ func (r *RootCmd) regenerateProxyToken() *clibase.Cmd {
 	return cmd
 }
 
-func (r *RootCmd) patchProxy() *clibase.Cmd {
+func (r *RootCmd) patchProxy() *serpent.Command {
 	var (
 		proxyName   string
 		displayName string
@@ -96,7 +102,7 @@ func (r *RootCmd) patchProxy() *clibase.Cmd {
 			}),
 			cliui.JSONFormat(),
 			// Table formatter expects a slice, make a slice of one.
-			cliui.ChangeFormatterData(cliui.TableFormat([]codersdk.WorkspaceProxy{}, []string{"proxy name", "proxy url"}),
+			cliui.ChangeFormatterData(cliui.TableFormat([]codersdk.WorkspaceProxy{}, []string{"name", "url"}),
 				func(data any) (any, error) {
 					response, ok := data.(codersdk.WorkspaceProxy)
 					if !ok {
@@ -107,16 +113,17 @@ func (r *RootCmd) patchProxy() *clibase.Cmd {
 		)
 	)
 	client := new(codersdk.Client)
-	cmd := &clibase.Cmd{
+	cmd := &serpent.Command{
 		Use:   "edit <name|id>",
 		Short: "Edit a workspace proxy",
-		Middleware: clibase.Chain(
-			clibase.RequireNArgs(1),
+		Middleware: serpent.Chain(
+			serpent.RequireNArgs(1),
 			r.InitClient(client),
 		),
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			ctx := inv.Context()
 			if proxyIcon == "" && displayName == "" && proxyName == "" {
+				_ = inv.Command.HelpHandler(inv)
 				return xerrors.Errorf("specify at least one field to update")
 			}
 
@@ -135,7 +142,7 @@ func (r *RootCmd) patchProxy() *clibase.Cmd {
 				displayName = proxy.DisplayName
 			}
 			if proxyIcon == "" {
-				proxyIcon = proxy.Icon
+				proxyIcon = proxy.IconURL
 			}
 
 			updated, err := client.PatchWorkspaceProxy(ctx, codersdk.PatchWorkspaceProxy{
@@ -159,38 +166,57 @@ func (r *RootCmd) patchProxy() *clibase.Cmd {
 
 	formatter.AttachOptions(&cmd.Options)
 	cmd.Options.Add(
-		clibase.Option{
+		serpent.Option{
 			Flag:        "name",
 			Description: "(Optional) Name of the proxy. This is used to identify the proxy.",
-			Value:       clibase.StringOf(&proxyName),
+			Value:       serpent.StringOf(&proxyName),
 		},
-		clibase.Option{
+		serpent.Option{
 			Flag:        "display-name",
 			Description: "(Optional) Display of the proxy. A more human friendly name to be displayed.",
-			Value:       clibase.StringOf(&displayName),
+			Value:       serpent.StringOf(&displayName),
 		},
-		clibase.Option{
+		serpent.Option{
 			Flag:        "icon",
 			Description: "(Optional) Display icon of the proxy.",
-			Value:       clibase.StringOf(&proxyIcon),
+			Value:       serpent.StringOf(&proxyIcon),
 		},
 	)
 
 	return cmd
 }
 
-func (r *RootCmd) deleteProxy() *clibase.Cmd {
+func (r *RootCmd) deleteProxy() *serpent.Command {
 	client := new(codersdk.Client)
-	cmd := &clibase.Cmd{
+	cmd := &serpent.Command{
 		Use:   "delete <name|id>",
 		Short: "Delete a workspace proxy",
-		Middleware: clibase.Chain(
-			clibase.RequireNArgs(1),
+		Options: serpent.OptionSet{
+			cliui.SkipPromptOption(),
+		},
+		Middleware: serpent.Chain(
+			serpent.RequireNArgs(1),
 			r.InitClient(client),
 		),
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			ctx := inv.Context()
-			err := client.DeleteWorkspaceProxyByName(ctx, inv.Args[0])
+
+			wsproxy, err := client.WorkspaceProxyByName(ctx, inv.Args[0])
+			if err != nil {
+				return xerrors.Errorf("fetch workspace proxy %q: %w", inv.Args[0], err)
+			}
+
+			// Confirm deletion of the template.
+			_, err = cliui.Prompt(inv, cliui.PromptOptions{
+				Text:      fmt.Sprintf("Delete this workspace proxy: %s?", pretty.Sprint(cliui.DefaultStyles.Code, wsproxy.DisplayName)),
+				IsConfirm: true,
+				Default:   cliui.ConfirmNo,
+			})
+			if err != nil {
+				return err
+			}
+
+			err = client.DeleteWorkspaceProxyByName(ctx, inv.Args[0])
 			if err != nil {
 				return xerrors.Errorf("delete workspace proxy %q: %w", inv.Args[0], err)
 			}
@@ -203,26 +229,66 @@ func (r *RootCmd) deleteProxy() *clibase.Cmd {
 	return cmd
 }
 
-func (r *RootCmd) createProxy() *clibase.Cmd {
+func (r *RootCmd) createProxy() *serpent.Command {
 	var (
 		proxyName   string
 		displayName string
 		proxyIcon   string
+		noPrompts   bool
 		formatter   = newUpdateProxyResponseFormatter()
 	)
+	validateIcon := func(s *serpent.String) error {
+		if !(strings.HasPrefix(s.Value(), "/emojis/") || strings.HasPrefix(s.Value(), "http")) {
+			return xerrors.New("icon must be a relative path to an emoji or a publicly hosted image URL")
+		}
+		return nil
+	}
 
 	client := new(codersdk.Client)
-	cmd := &clibase.Cmd{
+	cmd := &serpent.Command{
 		Use:   "create",
 		Short: "Create a workspace proxy",
-		Middleware: clibase.Chain(
-			clibase.RequireNArgs(0),
+		Middleware: serpent.Chain(
+			serpent.RequireNArgs(0),
 			r.InitClient(client),
 		),
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			ctx := inv.Context()
+			formatter.primaryAccessURL = client.URL.String()
+			var err error
+			if proxyName == "" && !noPrompts {
+				proxyName, err = cliui.Prompt(inv, cliui.PromptOptions{
+					Text: "Proxy Name:",
+				})
+				if err != nil {
+					return err
+				}
+			}
+			if displayName == "" && !noPrompts {
+				displayName, err = cliui.Prompt(inv, cliui.PromptOptions{
+					Text:    "Display Name:",
+					Default: proxyName,
+				})
+				if err != nil {
+					return err
+				}
+			}
+
+			if proxyIcon == "" && !noPrompts {
+				proxyIcon, err = cliui.Prompt(inv, cliui.PromptOptions{
+					Text:    "Icon URL:",
+					Default: "/emojis/1f5fa.png",
+					Validate: func(s string) error {
+						return validateIcon(serpent.StringOf(&s))
+					},
+				})
+				if err != nil {
+					return err
+				}
+			}
+
 			if proxyName == "" {
-				return xerrors.Errorf("proxy name is required")
+				return xerrors.New("proxy name is required")
 			}
 
 			resp, err := client.CreateWorkspaceProxy(ctx, codersdk.CreateWorkspaceProxyRequest{
@@ -245,26 +311,31 @@ func (r *RootCmd) createProxy() *clibase.Cmd {
 
 	formatter.AttachOptions(&cmd.Options)
 	cmd.Options.Add(
-		clibase.Option{
+		serpent.Option{
 			Flag:        "name",
 			Description: "Name of the proxy. This is used to identify the proxy.",
-			Value:       clibase.StringOf(&proxyName),
+			Value:       serpent.StringOf(&proxyName),
 		},
-		clibase.Option{
+		serpent.Option{
 			Flag:        "display-name",
 			Description: "Display of the proxy. If omitted, the name is reused as the display name.",
-			Value:       clibase.StringOf(&displayName),
+			Value:       serpent.StringOf(&displayName),
 		},
-		clibase.Option{
+		serpent.Option{
 			Flag:        "icon",
 			Description: "Display icon of the proxy.",
-			Value:       clibase.StringOf(&proxyIcon),
+			Value:       serpent.Validate(serpent.StringOf(&proxyIcon), validateIcon),
+		},
+		serpent.Option{
+			Flag:        "no-prompt",
+			Description: "Disable all input prompting, and fail if any required flags are missing.",
+			Value:       serpent.BoolOf(&noPrompts),
 		},
 	)
 	return cmd
 }
 
-func (r *RootCmd) listProxies() *clibase.Cmd {
+func (r *RootCmd) listProxies() *serpent.Command {
 	formatter := cliui.NewOutputFormatter(
 		cliui.TableFormat([]codersdk.WorkspaceProxy{}, []string{"name", "url", "proxy status"}),
 		cliui.JSONFormat(),
@@ -278,7 +349,7 @@ func (r *RootCmd) listProxies() *clibase.Cmd {
 			sep := ""
 			for i, proxy := range resp {
 				_, _ = str.WriteString(sep)
-				_, _ = str.WriteString(fmt.Sprintf("%d: %s %s %s", i, proxy.Name, proxy.URL, proxy.Status.Status))
+				_, _ = str.WriteString(fmt.Sprintf("%d: %s %s %s", i, proxy.Name, proxy.PathAppURL, proxy.Status.Status))
 				for _, errMsg := range proxy.Status.Report.Errors {
 					_, _ = str.WriteString(color.RedString("\n\tErr: %s", errMsg))
 				}
@@ -292,22 +363,22 @@ func (r *RootCmd) listProxies() *clibase.Cmd {
 	)
 
 	client := new(codersdk.Client)
-	cmd := &clibase.Cmd{
+	cmd := &serpent.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},
 		Short:   "List all workspace proxies",
-		Middleware: clibase.Chain(
-			clibase.RequireNArgs(0),
+		Middleware: serpent.Chain(
+			serpent.RequireNArgs(0),
 			r.InitClient(client),
 		),
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			ctx := inv.Context()
 			proxies, err := client.WorkspaceProxies(ctx)
 			if err != nil {
 				return xerrors.Errorf("list workspace proxies: %w", err)
 			}
 
-			output, err := formatter.Format(ctx, proxies)
+			output, err := formatter.Format(ctx, proxies.Regions)
 			if err != nil {
 				return err
 			}
@@ -323,8 +394,9 @@ func (r *RootCmd) listProxies() *clibase.Cmd {
 
 // updateProxyResponseFormatter is used for both create and regenerate proxy commands.
 type updateProxyResponseFormatter struct {
-	onlyToken bool
-	formatter *cliui.OutputFormatter
+	onlyToken        bool
+	formatter        *cliui.OutputFormatter
+	primaryAccessURL string
 }
 
 func (f *updateProxyResponseFormatter) Format(ctx context.Context, data codersdk.UpdateWorkspaceProxyResponse) (string, error) {
@@ -334,12 +406,12 @@ func (f *updateProxyResponseFormatter) Format(ctx context.Context, data codersdk
 	return f.formatter.Format(ctx, data)
 }
 
-func (f *updateProxyResponseFormatter) AttachOptions(opts *clibase.OptionSet) {
+func (f *updateProxyResponseFormatter) AttachOptions(opts *serpent.OptionSet) {
 	opts.Add(
-		clibase.Option{
+		serpent.Option{
 			Flag:        "only-token",
 			Description: "Only print the token. This is useful for scripting.",
-			Value:       clibase.BoolOf(&f.onlyToken),
+			Value:       serpent.BoolOf(&f.onlyToken),
 		},
 	)
 	f.formatter.AttachOptions(opts)
@@ -348,28 +420,37 @@ func (f *updateProxyResponseFormatter) AttachOptions(opts *clibase.OptionSet) {
 func newUpdateProxyResponseFormatter() *updateProxyResponseFormatter {
 	up := &updateProxyResponseFormatter{
 		onlyToken: false,
-		formatter: cliui.NewOutputFormatter(
-			// Text formatter should be human readable.
-			cliui.ChangeFormatterData(cliui.TextFormat(), func(data any) (any, error) {
+	}
+	up.formatter = cliui.NewOutputFormatter(
+		// Text formatter should be human readable.
+		cliui.ChangeFormatterData(cliui.TextFormat(), func(data any) (any, error) {
+			response, ok := data.(codersdk.UpdateWorkspaceProxyResponse)
+			if !ok {
+				return nil, xerrors.Errorf("unexpected type %T", data)
+			}
+
+			return fmt.Sprintf("Workspace Proxy %[1]q updated successfully.\n"+
+				pretty.Sprint(cliui.DefaultStyles.Placeholder, "—————————————————————————————————————————————————")+"\n"+
+				"Save this authentication token, it will not be shown again.\n"+
+				"Token: %[2]s\n"+
+				"\n"+
+				"Start the proxy by running:\n"+
+				cliui.Code("CODER_PROXY_SESSION_TOKEN=%[2]s coder wsproxy server --primary-access-url %[3]s --http-address=0.0.0.0:3001")+
+				// This is required to turn off the code style. Otherwise it appears in the code block until the end of the line.
+				pretty.Sprint(cliui.DefaultStyles.Placeholder, ""),
+				response.Proxy.Name, response.ProxyToken, up.primaryAccessURL), nil
+		}),
+		cliui.JSONFormat(),
+		// Table formatter expects a slice, make a slice of one.
+		cliui.ChangeFormatterData(cliui.TableFormat([]codersdk.UpdateWorkspaceProxyResponse{}, []string{"name", "url", "proxy token"}),
+			func(data any) (any, error) {
 				response, ok := data.(codersdk.UpdateWorkspaceProxyResponse)
 				if !ok {
 					return nil, xerrors.Errorf("unexpected type %T", data)
 				}
-				return fmt.Sprintf("Workspace Proxy %q created successfully. Save this token, it will not be shown again."+
-					"\nToken: %s", response.Proxy.Name, response.ProxyToken), nil
+				return []codersdk.UpdateWorkspaceProxyResponse{response}, nil
 			}),
-			cliui.JSONFormat(),
-			// Table formatter expects a slice, make a slice of one.
-			cliui.ChangeFormatterData(cliui.TableFormat([]codersdk.UpdateWorkspaceProxyResponse{}, []string{"proxy name", "proxy url", "proxy token"}),
-				func(data any) (any, error) {
-					response, ok := data.(codersdk.UpdateWorkspaceProxyResponse)
-					if !ok {
-						return nil, xerrors.Errorf("unexpected type %T", data)
-					}
-					return []codersdk.UpdateWorkspaceProxyResponse{response}, nil
-				}),
-		),
-	}
+	)
 
 	return up
 }

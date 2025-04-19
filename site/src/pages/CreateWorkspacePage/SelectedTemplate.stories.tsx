@@ -1,28 +1,29 @@
-import { ComponentMeta, Story } from "@storybook/react"
-import { MockTemplate } from "../../testHelpers/entities"
-import { SelectedTemplate, SelectedTemplateProps } from "./SelectedTemplate"
+import type { Meta, StoryObj } from "@storybook/react";
+import { MockTemplate } from "testHelpers/entities";
+import { SelectedTemplate } from "./SelectedTemplate";
 
-export default {
-  title: "components/SelectedTemplate",
-  component: SelectedTemplate,
-} as ComponentMeta<typeof SelectedTemplate>
+const meta: Meta<typeof SelectedTemplate> = {
+	title: "pages/CreateWorkspacePage/SelectedTemplate",
+	component: SelectedTemplate,
+};
 
-const Template: Story<SelectedTemplateProps> = (args) => (
-  <SelectedTemplate {...args} />
-)
+export default meta;
+type Story = StoryObj<typeof SelectedTemplate>;
 
-export const WithIcon = Template.bind({})
-WithIcon.args = {
-  template: {
-    ...MockTemplate,
-    icon: "/icon/docker.png",
-  },
-}
+export const WithIcon: Story = {
+	args: {
+		template: {
+			...MockTemplate,
+			icon: "/icon/docker.png",
+		},
+	},
+};
 
-export const WithoutIcon = Template.bind({})
-WithoutIcon.args = {
-  template: {
-    ...MockTemplate,
-    icon: "",
-  },
-}
+export const WithoutIcon: Story = {
+	args: {
+		template: {
+			...MockTemplate,
+			icon: "",
+		},
+	},
+};

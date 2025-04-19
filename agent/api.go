@@ -5,10 +5,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5"
 
-	"github.com/coder/coder/coderd/httpapi"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/agent/agentcontainers"
+	"github.com/coder/coder/v2/coderd/httpapi"
+	"github.com/coder/coder/v2/codersdk"
 )
 
 func (a *agent) apiHandler() http.Handler {
@@ -26,17 +27,55 @@ func (a *agent) apiHandler() http.Handler {
 		cpy[k] = b
 	}
 
-	lp := &listeningPortsHandler{ignorePorts: cpy}
+	cacheDuration := 1 * time.Second
+	if a.portCacheDuration > 0 {
+		cacheDuration = a.portCacheDuration
+	}
+
+	lp := &listeningPortsHandler{
+		ignorePorts:   cpy,
+		cacheDuration: cacheDuration,
+	}
+
+	containerAPIOpts := []agentcontainers.Option{
+		agentcontainers.WithLister(a.lister),
+	}
+	if a.experimentalDevcontainersEnabled {
+		manifest := a.manifest.Load()
+		if manifest != nil && len(manifest.Devcontainers) > 0 {
+			containerAPIOpts = append(
+				containerAPIOpts,
+				agentcontainers.WithDevcontainers(manifest.Devcontainers),
+			)
+		}
+	}
+	containerAPI := agentcontainers.NewAPI(a.logger.Named("containers"), containerAPIOpts...)
+
+	promHandler := PrometheusMetricsHandler(a.prometheusRegistry, a.logger)
+
+	r.Mount("/api/v0/containers", containerAPI.Routes())
 	r.Get("/api/v0/listening-ports", lp.handler)
+	r.Get("/api/v0/netcheck", a.HandleNetcheck)
+	r.Post("/api/v0/list-directory", a.HandleLS)
+	r.Get("/debug/logs", a.HandleHTTPDebugLogs)
+	r.Get("/debug/magicsock", a.HandleHTTPDebugMagicsock)
+	r.Get("/debug/magicsock/debug-logging/{state}", a.HandleHTTPMagicsockDebugLoggingState)
+	r.Get("/debug/manifest", a.HandleHTTPDebugManifest)
+	r.Get("/debug/prometheus", promHandler.ServeHTTP)
 
 	return r
 }
 
 type listeningPortsHandler struct {
-	mut         sync.Mutex
-	ports       []codersdk.WorkspaceAgentListeningPort
-	mtime       time.Time
-	ignorePorts map[int]string
+	ignorePorts   map[int]string
+	cacheDuration time.Duration
+
+	//nolint: unused  // used on some but not all platforms
+	mut sync.Mutex
+	//nolint: unused  // used on some but not all platforms
+	ports []codersdk.WorkspaceAgentListeningPort
+	//nolint: unused  // used on some but not all platforms
+	mtime time.Time
 }
 
 // handler returns a list of listening ports. This is tested by coderd's

@@ -16,14 +16,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/clitest"
-	"github.com/coder/coder/coderd/coderdtest"
-	"github.com/coder/coder/coderd/httpapi"
-	"github.com/coder/coder/codersdk"
-	"github.com/coder/coder/enterprise/coderd/coderdenttest"
-	"github.com/coder/coder/pty/ptytest"
-	"github.com/coder/coder/testutil"
+	"github.com/coder/coder/v2/cli/clitest"
+	"github.com/coder/coder/v2/coderd/httpapi"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/enterprise/coderd/coderdenttest"
+	"github.com/coder/coder/v2/pty/ptytest"
+	"github.com/coder/coder/v2/testutil"
+	"github.com/coder/serpent"
 )
 
 const (
@@ -118,13 +117,12 @@ func TestLicensesAddReal(t *testing.T) {
 	t.Parallel()
 	t.Run("Fails", func(t *testing.T) {
 		t.Parallel()
-		client := coderdenttest.New(t, nil)
-		coderdtest.CreateFirstUser(t, client)
+		client, _ := coderdenttest.New(t, &coderdenttest.Options{DontAddLicense: true})
 		inv, conf := newCLI(
 			t,
 			"licenses", "add", "-l", fakeLicenseJWT,
 		)
-		clitest.SetupConfig(t, client, conf)
+		clitest.SetupConfig(t, client, conf) //nolint:gocritic // requires owner
 
 		waiter := clitest.StartWithWaiter(t, inv)
 		var coderError *codersdk.Error
@@ -140,9 +138,10 @@ func TestLicensesListFake(t *testing.T) {
 	// so instead we have to fake the HTTP interaction.
 	t.Run("Mainline", func(t *testing.T) {
 		t.Parallel()
+		expectedLicenseExpires := time.Date(2024, 4, 6, 16, 53, 35, 0, time.UTC)
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
-		inv := setupFakeLicenseServerTest(t, "licenses", "list")
+		inv := setupFakeLicenseServerTest(t, "licenses", "list", "-o", "json")
 		stdout := new(bytes.Buffer)
 		inv.Stdout = stdout
 		errC := make(chan error)
@@ -158,6 +157,13 @@ func TestLicensesListFake(t *testing.T) {
 		assert.Equal(t, "claim1", licenses[0].Claims["h1"])
 		assert.Equal(t, int32(5), licenses[1].ID)
 		assert.Equal(t, "claim2", licenses[1].Claims["h2"])
+		expiresClaim := licenses[0].Claims["license_expires_human"]
+		expiresString, ok := expiresClaim.(string)
+		require.True(t, ok, "license_expires_human claim is not a string")
+		assert.NotEmpty(t, expiresClaim)
+		expiresTime, err := time.Parse(time.RFC3339, expiresString)
+		require.NoError(t, err)
+		require.Equal(t, expectedLicenseExpires, expiresTime.UTC())
 	})
 }
 
@@ -165,17 +171,16 @@ func TestLicensesListReal(t *testing.T) {
 	t.Parallel()
 	t.Run("Empty", func(t *testing.T) {
 		t.Parallel()
-		client := coderdenttest.New(t, nil)
-		coderdtest.CreateFirstUser(t, client)
+		client, _ := coderdenttest.New(t, &coderdenttest.Options{DontAddLicense: true})
 		inv, conf := newCLI(
 			t,
-			"licenses", "list",
+			"licenses", "list", "-o", "json",
 		)
 		stdout := new(bytes.Buffer)
 		inv.Stdout = stdout
 		stderr := new(bytes.Buffer)
 		inv.Stderr = stderr
-		clitest.SetupConfig(t, client, conf)
+		clitest.SetupConfig(t, client, conf) //nolint:gocritic // requires owner
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 		errC := make(chan error)
@@ -207,12 +212,11 @@ func TestLicensesDeleteReal(t *testing.T) {
 	t.Parallel()
 	t.Run("Empty", func(t *testing.T) {
 		t.Parallel()
-		client := coderdenttest.New(t, nil)
-		coderdtest.CreateFirstUser(t, client)
+		client, _ := coderdenttest.New(t, &coderdenttest.Options{DontAddLicense: true})
 		inv, conf := newCLI(
 			t,
 			"licenses", "delete", "1")
-		clitest.SetupConfig(t, client, conf)
+		clitest.SetupConfig(t, client, conf) //nolint:gocritic // requires owner
 
 		var coderError *codersdk.Error
 		clitest.StartWithWaiter(t, inv).RequireAs(&coderError)
@@ -221,7 +225,7 @@ func TestLicensesDeleteReal(t *testing.T) {
 	})
 }
 
-func setupFakeLicenseServerTest(t *testing.T, args ...string) *clibase.Invocation {
+func setupFakeLicenseServerTest(t *testing.T, args ...string) *serpent.Invocation {
 	t.Helper()
 	s := httptest.NewServer(newFakeLicenseAPI(t))
 	t.Cleanup(s.Close)
@@ -236,7 +240,7 @@ func setupFakeLicenseServerTest(t *testing.T, args ...string) *clibase.Invocatio
 	return inv
 }
 
-func attachPty(t *testing.T, inv *clibase.Invocation) *ptytest.PTY {
+func attachPty(t *testing.T, inv *serpent.Invocation) *ptytest.PTY {
 	pty := ptytest.New(t)
 	inv.Stdin = pty.Input()
 	inv.Stdout = pty.Output()
@@ -250,6 +254,7 @@ func newFakeLicenseAPI(t *testing.T) http.Handler {
 	r.Post("/api/v2/licenses", a.postLicense)
 	r.Get("/api/v2/licenses", a.licenses)
 	r.Get("/api/v2/buildinfo", a.noop)
+	r.Get("/api/v2/users/me", a.noop)
 	r.Delete("/api/v2/licenses/{id}", a.deleteLicense)
 	r.Get("/api/v2/entitlements", a.entitlements)
 	return r
@@ -294,7 +299,8 @@ func (s *fakeLicenseAPI) licenses(rw http.ResponseWriter, _ *http.Request) {
 			ID:         1,
 			UploadedAt: time.Now(),
 			Claims: map[string]interface{}{
-				"h1": "claim1",
+				"license_expires": 1712422415,
+				"h1":              "claim1",
 				"features": map[string]int64{
 					"f1": 1,
 					"f2": 2,

@@ -1,85 +1,90 @@
-import Table from "@mui/material/Table"
-import TableBody from "@mui/material/TableBody"
-import TableCell from "@mui/material/TableCell"
-import TableContainer from "@mui/material/TableContainer"
-import TableHead from "@mui/material/TableHead"
-import TableRow from "@mui/material/TableRow"
-import { ChooseOne, Cond } from "components/Conditionals/ChooseOne"
-import { Stack } from "components/Stack/Stack"
-import { TableEmpty } from "components/TableEmpty/TableEmpty"
-import { TableLoader } from "components/TableLoader/TableLoader"
-import { FC } from "react"
-import { AlertBanner } from "components/AlertBanner/AlertBanner"
-import { Region } from "api/typesGenerated"
-import { ProxyRow } from "./WorkspaceProxyRow"
-import { ProxyLatencyReport } from "contexts/useProxyLatency"
+import Table from "@mui/material/Table";
+import TableBody from "@mui/material/TableBody";
+import TableCell from "@mui/material/TableCell";
+import TableContainer from "@mui/material/TableContainer";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
+import type { Region } from "api/typesGenerated";
+import { ErrorAlert } from "components/Alert/ErrorAlert";
+import { ChooseOne, Cond } from "components/Conditionals/ChooseOne";
+import {
+	SettingsHeader,
+	SettingsHeaderDescription,
+	SettingsHeaderTitle,
+} from "components/SettingsHeader/SettingsHeader";
+import { Stack } from "components/Stack/Stack";
+import { TableEmpty } from "components/TableEmpty/TableEmpty";
+import { TableLoader } from "components/TableLoader/TableLoader";
+import type { ProxyLatencyReport } from "contexts/useProxyLatency";
+import type { FC } from "react";
+import { ProxyRow } from "./WorkspaceProxyRow";
 
 export interface WorkspaceProxyViewProps {
-  proxies?: Region[]
-  proxyLatencies?: Record<string, ProxyLatencyReport>
-  getWorkspaceProxiesError?: Error | unknown
-  isLoading: boolean
-  hasLoaded: boolean
-  onSelect: (proxy: Region) => void
-  preferredProxy?: Region
-  selectProxyError?: Error | unknown
+	proxies?: readonly Region[];
+	proxyLatencies?: Record<string, ProxyLatencyReport>;
+	getWorkspaceProxiesError?: unknown;
+	isLoading: boolean;
+	hasLoaded: boolean;
+	preferredProxy?: Region;
+	selectProxyError?: unknown;
 }
 
-export const WorkspaceProxyView: FC<
-  React.PropsWithChildren<WorkspaceProxyViewProps>
-> = ({
-  proxies,
-  proxyLatencies,
-  getWorkspaceProxiesError,
-  isLoading,
-  hasLoaded,
-  onSelect,
-  selectProxyError,
-  preferredProxy,
+export const WorkspaceProxyView: FC<WorkspaceProxyViewProps> = ({
+	proxies,
+	proxyLatencies,
+	getWorkspaceProxiesError,
+	isLoading,
+	hasLoaded,
+	selectProxyError,
 }) => {
-  return (
-    <Stack>
-      {Boolean(getWorkspaceProxiesError) && (
-        <AlertBanner severity="error" error={getWorkspaceProxiesError} />
-      )}
-      {Boolean(selectProxyError) && (
-        <AlertBanner severity="error" error={selectProxyError} />
-      )}
-      <TableContainer>
-        <Table>
-          <TableHead>
-            <TableRow>
-              <TableCell width="40%">Proxy</TableCell>
-              <TableCell width="30%">URL</TableCell>
-              <TableCell width="10%">Status</TableCell>
-              <TableCell width="20%">Latency</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            <ChooseOne>
-              <Cond condition={isLoading}>
-                <TableLoader />
-              </Cond>
-              <Cond condition={hasLoaded && proxies?.length === 0}>
-                <TableEmpty message="No workspace proxies found" />
-              </Cond>
-              <Cond>
-                {proxies?.map((proxy) => (
-                  <ProxyRow
-                    latency={proxyLatencies?.[proxy.id]}
-                    key={proxy.id}
-                    proxy={proxy}
-                    onSelectRegion={onSelect}
-                    preferred={
-                      preferredProxy ? proxy.id === preferredProxy.id : false
-                    }
-                  />
-                ))}
-              </Cond>
-            </ChooseOne>
-          </TableBody>
-        </Table>
-      </TableContainer>
-    </Stack>
-  )
-}
+	return (
+		<Stack>
+			<SettingsHeader>
+				<SettingsHeaderTitle>Workspace Proxies</SettingsHeaderTitle>
+				<SettingsHeaderDescription>
+					Workspace proxies improve terminal and web app connections to
+					workspaces.
+				</SettingsHeaderDescription>
+			</SettingsHeader>
+
+			{Boolean(getWorkspaceProxiesError) && (
+				<ErrorAlert error={getWorkspaceProxiesError} />
+			)}
+			{Boolean(selectProxyError) && <ErrorAlert error={selectProxyError} />}
+			<TableContainer>
+				<Table>
+					<TableHead>
+						<TableRow>
+							<TableCell width="70%">Proxy</TableCell>
+							<TableCell width="10%" css={{ textAlign: "right" }}>
+								Status
+							</TableCell>
+							<TableCell width="20%" css={{ textAlign: "right" }}>
+								Latency
+							</TableCell>
+						</TableRow>
+					</TableHead>
+					<TableBody>
+						<ChooseOne>
+							<Cond condition={isLoading}>
+								<TableLoader />
+							</Cond>
+							<Cond condition={hasLoaded && proxies?.length === 0}>
+								<TableEmpty message="No workspace proxies found" />
+							</Cond>
+							<Cond>
+								{proxies?.map((proxy) => (
+									<ProxyRow
+										latency={proxyLatencies?.[proxy.id]}
+										key={proxy.id}
+										proxy={proxy}
+									/>
+								))}
+							</Cond>
+						</ChooseOne>
+					</TableBody>
+				</Table>
+			</TableContainer>
+		</Stack>
+	);
+};

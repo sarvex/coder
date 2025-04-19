@@ -3,10 +3,11 @@ package coderd
 import (
 	"net/http"
 
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/httpapi"
-	"github.com/coder/coder/coderd/rbac"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/httpapi"
+	"github.com/coder/coder/v2/coderd/rbac"
+	"github.com/coder/coder/v2/coderd/rbac/policy"
+	"github.com/coder/coder/v2/codersdk"
 )
 
 // replicas returns the number of replicas that are active in Coder.
@@ -19,12 +20,12 @@ import (
 // @Success 200 {array} codersdk.Replica
 // @Router /replicas [get]
 func (api *API) replicas(rw http.ResponseWriter, r *http.Request) {
-	if !api.AGPL.Authorize(r, rbac.ActionRead, rbac.ResourceReplicas) {
+	if !api.AGPL.Authorize(r, policy.ActionRead, rbac.ResourceReplicas) {
 		httpapi.ResourceNotFound(rw)
 		return
 	}
 
-	replicas := api.replicaManager.All()
+	replicas := api.replicaManager.AllPrimary()
 	res := make([]codersdk.Replica, 0, len(replicas))
 	for _, replica := range replicas {
 		res = append(res, convertReplica(replica))

@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,17 +17,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/cli"
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/config"
-	"github.com/coder/coder/codersdk"
-	"github.com/coder/coder/provisioner/echo"
-	"github.com/coder/coder/testutil"
+	"cdr.dev/slog"
+	"cdr.dev/slog/sloggers/slogtest"
+	"github.com/coder/coder/v2/cli"
+	"github.com/coder/coder/v2/cli/config"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/provisioner/echo"
+	"github.com/coder/coder/v2/testutil"
+	"github.com/coder/serpent"
 )
 
 // New creates a CLI instance with a configuration pointed to a
 // temporary testing directory.
-func New(t *testing.T, args ...string) (*clibase.Invocation, config.Root) {
+func New(t testing.TB, args ...string) (*serpent.Invocation, config.Root) {
 	var root cli.RootCmd
 
 	cmd, err := root.Command(root.AGPL())
@@ -39,7 +40,7 @@ func New(t *testing.T, args ...string) (*clibase.Invocation, config.Root) {
 
 type logWriter struct {
 	prefix string
-	t      *testing.T
+	log    slog.Logger
 }
 
 func (l *logWriter) Write(p []byte) (n int, err error) {
@@ -47,22 +48,29 @@ func (l *logWriter) Write(p []byte) (n int, err error) {
 	if trimmed == "" {
 		return len(p), nil
 	}
-	l.t.Log(
-		l.prefix + ": " + trimmed,
+	l.log.Info(
+		context.Background(),
+		l.prefix+": "+trimmed,
 	)
 	return len(p), nil
 }
 
 func NewWithCommand(
-	t *testing.T, cmd *clibase.Cmd, args ...string,
-) (*clibase.Invocation, config.Root) {
+	t testing.TB, cmd *serpent.Command, args ...string,
+) (*serpent.Invocation, config.Root) {
 	configDir := config.Root(t.TempDir())
-	i := &clibase.Invocation{
+	// I really would like to fail test on error logs, but realistically, turning on by default
+	// in all our CLI tests is going to create a lot of flaky noise.
+	logger := slogtest.Make(t, &slogtest.Options{IgnoreErrors: true}).
+		Leveled(slog.LevelDebug).
+		Named("cli")
+	i := &serpent.Invocation{
 		Command: cmd,
 		Args:    append([]string{"--global-config", string(configDir)}, args...),
 		Stdin:   io.LimitReader(nil, 0),
-		Stdout:  (&logWriter{prefix: "stdout", t: t}),
-		Stderr:  (&logWriter{prefix: "stderr", t: t}),
+		Stdout:  (&logWriter{prefix: "stdout", log: logger}),
+		Stderr:  (&logWriter{prefix: "stderr", log: logger}),
+		Logger:  logger,
 	}
 	t.Logf("invoking command: %s %s", cmd.Name(), strings.Join(i.Args, " "))
 
@@ -82,7 +90,10 @@ func SetupConfig(t *testing.T, client *codersdk.Client, root config.Root) {
 // new temporary testing directory.
 func CreateTemplateVersionSource(t *testing.T, responses *echo.Responses) string {
 	directory := t.TempDir()
-	f, err := ioutil.TempFile(directory, "*.tf")
+	f, err := os.CreateTemp(directory, "*.tf")
+	require.NoError(t, err)
+	_ = f.Close()
+	f, err = os.Create(filepath.Join(directory, ".terraform.lock.hcl"))
 	require.NoError(t, err)
 	_ = f.Close()
 	data, err := echo.Tar(responses)
@@ -129,7 +140,11 @@ func extractTar(t *testing.T, data []byte, directory string) {
 
 // Start runs the command in a goroutine and cleans it up when the test
 // completed.
-func Start(t *testing.T, inv *clibase.Invocation) {
+func Start(t *testing.T, inv *serpent.Invocation) {
+	StartWithAssert(t, inv, nil)
+}
+
+func StartWithAssert(t *testing.T, inv *serpent.Invocation, assertCallback func(t *testing.T, err error)) { //nolint:revive
 	t.Helper()
 
 	closeCh := make(chan struct{})
@@ -137,12 +152,19 @@ func Start(t *testing.T, inv *clibase.Invocation) {
 	// before ours.
 	waiter := StartWithWaiter(t, inv)
 	t.Cleanup(func() {
+		waiter.Cancel()
 		<-closeCh
 	})
 
 	go func() {
 		defer close(closeCh)
 		err := waiter.Wait()
+
+		if assertCallback != nil {
+			assertCallback(t, err)
+			return
+		}
+
 		switch {
 		case errors.Is(err, context.Canceled):
 			return
@@ -153,7 +175,7 @@ func Start(t *testing.T, inv *clibase.Invocation) {
 }
 
 // Run runs the command and asserts that there is no error.
-func Run(t *testing.T, inv *clibase.Invocation) {
+func Run(t *testing.T, inv *serpent.Invocation) {
 	t.Helper()
 
 	err := inv.Run()
@@ -163,9 +185,14 @@ func Run(t *testing.T, inv *clibase.Invocation) {
 type ErrorWaiter struct {
 	waitOnce    sync.Once
 	cachedError error
+	cancelFunc  context.CancelFunc
 
 	c <-chan error
 	t *testing.T
+}
+
+func (w *ErrorWaiter) Cancel() {
+	w.cancelFunc()
 }
 
 func (w *ErrorWaiter) Wait() error {
@@ -201,7 +228,7 @@ func (w *ErrorWaiter) RequireAs(want interface{}) {
 
 // StartWithWaiter runs the command in a goroutine but returns the error instead
 // of asserting it. This is useful for testing error cases.
-func StartWithWaiter(t *testing.T, inv *clibase.Invocation) *ErrorWaiter {
+func StartWithWaiter(t *testing.T, inv *serpent.Invocation) *ErrorWaiter {
 	t.Helper()
 
 	var (
@@ -241,5 +268,5 @@ func StartWithWaiter(t *testing.T, inv *clibase.Invocation) *ErrorWaiter {
 		cleaningUp.Store(true)
 		<-doneCh
 	})
-	return &ErrorWaiter{c: errCh, t: t}
+	return &ErrorWaiter{c: errCh, t: t, cancelFunc: cancel}
 }

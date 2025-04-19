@@ -55,7 +55,7 @@ while true; do
 		;;
 	--build-base)
 		build_base="$2"
-		shift
+		shift 2
 		;;
 	--push)
 		push=1
@@ -152,5 +152,7 @@ if [[ "$push" == 1 ]]; then
 	log "--- Pushing Docker image for $arch ($image_tag)"
 	docker push "$image_tag" 1>&2
 fi
+
+# SBOM generation and attestation moved to the GitHub workflow
 
 echo "$image_tag"

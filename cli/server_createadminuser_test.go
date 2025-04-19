@@ -11,13 +11,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/cli/clitest"
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/database/postgres"
-	"github.com/coder/coder/coderd/rbac"
-	"github.com/coder/coder/coderd/userpassword"
-	"github.com/coder/coder/pty/ptytest"
-	"github.com/coder/coder/testutil"
+	"github.com/coder/coder/v2/cli/clitest"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbtestutil"
+	"github.com/coder/coder/v2/coderd/database/dbtime"
+	"github.com/coder/coder/v2/coderd/rbac"
+	"github.com/coder/coder/v2/coderd/userpassword"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/pty/ptytest"
+	"github.com/coder/coder/v2/testutil"
 )
 
 //nolint:paralleltest, tparallel
@@ -55,22 +57,22 @@ func TestServerCreateAdminUser(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, ok, "password does not match")
 
-		require.EqualValues(t, []string{rbac.RoleOwner()}, user.RBACRoles, "user does not have owner role")
+		require.EqualValues(t, []string{codersdk.RoleOwner}, user.RBACRoles, "user does not have owner role")
 
 		// Check that user is admin in every org.
-		orgs, err := db.GetOrganizations(ctx)
+		orgs, err := db.GetOrganizations(ctx, database.GetOrganizationsParams{})
 		require.NoError(t, err)
 		orgIDs := make(map[uuid.UUID]struct{}, len(orgs))
 		for _, org := range orgs {
 			orgIDs[org.ID] = struct{}{}
 		}
 
-		orgMemberships, err := db.GetOrganizationMembershipsByUserID(ctx, user.ID)
+		orgMemberships, err := db.OrganizationMembers(ctx, database.OrganizationMembersParams{UserID: user.ID})
 		require.NoError(t, err)
 		orgIDs2 := make(map[uuid.UUID]struct{}, len(orgMemberships))
 		for _, membership := range orgMemberships {
-			orgIDs2[membership.OrganizationID] = struct{}{}
-			assert.Equal(t, []string{rbac.RoleOrgAdmin(membership.OrganizationID)}, membership.Roles, "user is not org admin")
+			orgIDs2[membership.OrganizationMember.OrganizationID] = struct{}{}
+			assert.Equal(t, []string{rbac.RoleOrgAdmin()}, membership.OrganizationMember.Roles, "user is not org admin")
 		}
 
 		require.Equal(t, orgIDs, orgIDs2, "user is not in all orgs")
@@ -83,9 +85,8 @@ func TestServerCreateAdminUser(t *testing.T) {
 			// Skip on non-Linux because it spawns a PostgreSQL instance.
 			t.SkipNow()
 		}
-		connectionURL, closeFunc, err := postgres.Open()
+		connectionURL, err := dbtestutil.Open(t)
 		require.NoError(t, err)
-		defer closeFunc()
 
 		sqlDB, err := sql.Open("postgres", connectionURL)
 		require.NoError(t, err)
@@ -106,15 +107,15 @@ func TestServerCreateAdminUser(t *testing.T) {
 		_, err = db.InsertOrganization(ctx, database.InsertOrganizationParams{
 			ID:        org1ID,
 			Name:      org1Name,
-			CreatedAt: database.Now(),
-			UpdatedAt: database.Now(),
+			CreatedAt: dbtime.Now(),
+			UpdatedAt: dbtime.Now(),
 		})
 		require.NoError(t, err)
 		_, err = db.InsertOrganization(ctx, database.InsertOrganizationParams{
 			ID:        org2ID,
 			Name:      org2Name,
-			CreatedAt: database.Now(),
-			UpdatedAt: database.Now(),
+			CreatedAt: dbtime.Now(),
+			UpdatedAt: dbtime.Now(),
 		})
 		require.NoError(t, err)
 
@@ -149,15 +150,14 @@ func TestServerCreateAdminUser(t *testing.T) {
 			// Skip on non-Linux because it spawns a PostgreSQL instance.
 			t.SkipNow()
 		}
-		connectionURL, closeFunc, err := postgres.Open()
+		connectionURL, err := dbtestutil.Open(t)
 		require.NoError(t, err)
-		defer closeFunc()
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitMedium)
 		defer cancel()
 
 		inv, _ := clitest.New(t, "server", "create-admin-user")
-		inv.Environ.Set("CODER_POSTGRES_URL", connectionURL)
+		inv.Environ.Set("CODER_PG_CONNECTION_URL", connectionURL)
 		inv.Environ.Set("CODER_SSH_KEYGEN_ALGORITHM", "ed25519")
 		inv.Environ.Set("CODER_USERNAME", username)
 		inv.Environ.Set("CODER_EMAIL", email)
@@ -183,9 +183,8 @@ func TestServerCreateAdminUser(t *testing.T) {
 			// Skip on non-Linux because it spawns a PostgreSQL instance.
 			t.SkipNow()
 		}
-		connectionURL, closeFunc, err := postgres.Open()
+		connectionURL, err := dbtestutil.Open(t)
 		require.NoError(t, err)
-		defer closeFunc()
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitMedium)
 		defer cancel()
@@ -223,9 +222,8 @@ func TestServerCreateAdminUser(t *testing.T) {
 			// Skip on non-Linux because it spawns a PostgreSQL instance.
 			t.SkipNow()
 		}
-		connectionURL, closeFunc, err := postgres.Open()
+		connectionURL, err := dbtestutil.Open(t)
 		require.NoError(t, err)
-		defer closeFunc()
 		ctx, cancelFunc := context.WithCancel(context.Background())
 		defer cancelFunc()
 

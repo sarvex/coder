@@ -1,56 +1,57 @@
-import { makeStyles } from "@mui/styles"
-import TableRow, { TableRowProps } from "@mui/material/TableRow"
-import { PropsWithChildren } from "react"
-import { combineClasses } from "utils/combineClasses"
+import type { Interpolation } from "@emotion/react";
+import TableRow, { type TableRowProps } from "@mui/material/TableRow";
+import { forwardRef } from "react";
+import type { Theme } from "theme";
 
-interface TimelineEntryProps {
-  clickable?: boolean
+interface TimelineEntryProps extends TableRowProps {
+	clickable?: boolean;
 }
 
-export const TimelineEntry = ({
-  children,
-  clickable = true,
-  ...props
-}: PropsWithChildren<TimelineEntryProps & TableRowProps>): JSX.Element => {
-  const styles = useStyles()
-  return (
-    <TableRow
-      className={combineClasses({
-        [styles.timelineEntry]: true,
-        [styles.clickable]: clickable,
-      })}
-      {...props}
-    >
-      {children}
-    </TableRow>
-  )
-}
+export const TimelineEntry = forwardRef<
+	HTMLTableRowElement,
+	TimelineEntryProps
+>(function TimelineEntry({ children, clickable = true, ...props }, ref) {
+	return (
+		<TableRow
+			ref={ref}
+			css={[styles.row, clickable ? styles.clickable : null]}
+			{...props}
+		>
+			{children}
+		</TableRow>
+	);
+});
 
-const useStyles = makeStyles((theme) => ({
-  clickable: {
-    cursor: "pointer",
+const styles = {
+	row: (theme) => ({
+		"--side-padding": "32px",
+		"&:focus": {
+			outlineStyle: "solid",
+			outlineOffset: -1,
+			outlineWidth: 2,
+			outlineColor: theme.palette.primary.main,
+		},
+		"& td": {
+			position: "relative",
+			overflow: "hidden",
+		},
+		"& td:before": {
+			"--line-width": "2px",
+			position: "absolute",
+			left: "calc((var(--side-padding) + var(--avatar-default)/2) - var(--line-width) / 2)",
+			display: "block",
+			content: "''",
+			height: "100%",
+			width: "var(--line-width)",
+			background: theme.palette.divider,
+		},
+	}),
 
-    "&:hover": {
-      backgroundColor: theme.palette.action.hover,
-    },
-  },
+	clickable: (theme) => ({
+		cursor: "pointer",
 
-  timelineEntry: {
-    position: "relative",
-    "&:focus": {
-      outlineStyle: "solid",
-      outlineOffset: -1,
-      outlineWidth: 2,
-      outlineColor: theme.palette.secondary.dark,
-    },
-    "& td:before": {
-      position: "absolute",
-      left: 50,
-      display: "block",
-      content: "''",
-      height: "100%",
-      width: 2,
-      background: theme.palette.divider,
-    },
-  },
-}))
+		"&:hover": {
+			backgroundColor: theme.palette.action.hover,
+		},
+	}),
+} satisfies Record<string, Interpolation<Theme>>;

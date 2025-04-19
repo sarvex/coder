@@ -7,20 +7,20 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/cliui"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/serpent"
 )
 
-func (r *RootCmd) logout() *clibase.Cmd {
+func (r *RootCmd) logout() *serpent.Command {
 	client := new(codersdk.Client)
-	cmd := &clibase.Cmd{
+	cmd := &serpent.Command{
 		Use:   "logout",
 		Short: "Unauthenticate your local session",
-		Middleware: clibase.Chain(
+		Middleware: serpent.Chain(
 			r.InitClient(client),
 		),
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			var errors []error
 
 			config := r.createConfig()
@@ -68,7 +68,7 @@ func (r *RootCmd) logout() *clibase.Cmd {
 				errorString := strings.TrimRight(errorStringBuilder.String(), "\n")
 				return xerrors.New("Failed to log out.\n" + errorString)
 			}
-			_, _ = fmt.Fprintf(inv.Stdout, Caret+"You are no longer logged in. You can log in using 'coder login <url>'.\n")
+			_, _ = fmt.Fprint(inv.Stdout, Caret+"You are no longer logged in. You can log in using 'coder login <url>'.\n")
 			return nil
 		},
 	}

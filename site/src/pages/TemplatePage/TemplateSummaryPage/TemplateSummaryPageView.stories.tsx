@@ -1,78 +1,32 @@
-import { Story } from "@storybook/react"
+import type { Meta, StoryObj } from "@storybook/react";
 import {
-  MockTemplate,
-  MockTemplateDAUResponse,
-  MockTemplateVersion,
-  MockTemplateVersion3,
-  MockWorkspaceResource,
-  MockWorkspaceResource2,
-} from "testHelpers/entities"
-import {
-  TemplateSummaryPageView,
-  TemplateSummaryPageViewProps,
-} from "./TemplateSummaryPageView"
+	MockTemplate,
+	MockTemplateVersion,
+	MockWorkspaceResource,
+	MockWorkspaceVolumeResource,
+} from "testHelpers/entities";
+import { TemplateSummaryPageView } from "./TemplateSummaryPageView";
 
-export default {
-  title: "pages/TemplateSummaryPageView",
-  component: TemplateSummaryPageView,
-}
+const meta: Meta<typeof TemplateSummaryPageView> = {
+	title: "pages/TemplatePage/TemplateSummaryPageView",
+	component: TemplateSummaryPageView,
+};
 
-const Template: Story<TemplateSummaryPageViewProps> = (args) => (
-  <TemplateSummaryPageView {...args} />
-)
+export default meta;
+type Story = StoryObj<typeof TemplateSummaryPageView>;
 
-export const Example = Template.bind({})
-Example.args = {
-  template: MockTemplate,
-  activeVersion: MockTemplateVersion,
-  data: {
-    resources: [MockWorkspaceResource, MockWorkspaceResource2],
-    daus: MockTemplateDAUResponse,
-  },
-}
+export const Example: Story = {
+	args: {
+		template: MockTemplate,
+		activeVersion: MockTemplateVersion,
+		resources: [MockWorkspaceResource, MockWorkspaceVolumeResource],
+	},
+};
 
-export const NoIcon = Template.bind({})
-NoIcon.args = {
-  template: { ...MockTemplate, icon: "" },
-  activeVersion: MockTemplateVersion,
-  data: {
-    resources: [MockWorkspaceResource, MockWorkspaceResource2],
-    daus: MockTemplateDAUResponse,
-  },
-}
-
-export const SmallViewport = Template.bind({})
-SmallViewport.args = {
-  template: MockTemplate,
-  activeVersion: {
-    ...MockTemplateVersion,
-    readme: `---
-  name:Template test
-  ---
-  ## Instructions
-  You can add instructions here
-
-  [Some link info](https://coder.com)
-  \`\`\`
-  # This is a really long sentence to test that the code block wraps into a new line properly.
-  \`\`\`
-  `,
-  },
-  data: {
-    resources: [MockWorkspaceResource, MockWorkspaceResource2],
-    daus: MockTemplateDAUResponse,
-  },
-}
-SmallViewport.parameters = {
-  chromatic: { viewports: [600] },
-}
-
-export const WithDeprecatedParameters = Template.bind({})
-WithDeprecatedParameters.args = {
-  template: MockTemplate,
-  activeVersion: MockTemplateVersion3,
-  data: {
-    resources: [MockWorkspaceResource, MockWorkspaceResource2],
-    daus: MockTemplateDAUResponse,
-  },
-}
+export const NoIcon: Story = {
+	args: {
+		template: { ...MockTemplate, icon: "" },
+		activeVersion: MockTemplateVersion,
+		resources: [MockWorkspaceResource, MockWorkspaceVolumeResource],
+	},
+};

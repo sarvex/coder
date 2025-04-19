@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/coderd/tracing"
+	"github.com/coder/coder/v2/coderd/tracing"
 )
 
 func TestStatusWriter(t *testing.T) {
@@ -115,6 +115,22 @@ func TestStatusWriter(t *testing.T) {
 		_, _, err := w.Hijack()
 		require.Error(t, err)
 		require.Equal(t, "hijacked", err.Error())
+	})
+
+	t.Run("Middleware", func(t *testing.T) {
+		t.Parallel()
+
+		var (
+			sw *tracing.StatusWriter
+			rr = httptest.NewRecorder()
+		)
+		tracing.StatusWriterMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sw = w.(*tracing.StatusWriter)
+			w.WriteHeader(http.StatusNoContent)
+		})).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+
+		require.Equal(t, http.StatusNoContent, rr.Code, "rr status code not set")
+		require.Equal(t, http.StatusNoContent, sw.Status, "sw status code not set")
 	})
 }
 

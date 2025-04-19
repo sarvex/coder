@@ -1,115 +1,167 @@
+import OpenInNewOutlined from "@mui/icons-material/OpenInNewOutlined";
+import Button from "@mui/material/Button";
+import { API } from "api/api";
+import { isApiValidationError } from "api/errors";
+import { checkAuthorization } from "api/queries/authCheck";
+import { templateByName } from "api/queries/templates";
+import type { Workspace, WorkspaceBuildParameter } from "api/typesGenerated";
+import { ErrorAlert } from "components/Alert/ErrorAlert";
+import { EmptyState } from "components/EmptyState/EmptyState";
+import { Loader } from "components/Loader/Loader";
+import { PageHeader, PageHeaderTitle } from "components/PageHeader/PageHeader";
+import type { FC } from "react";
+import { Helmet } from "react-helmet-async";
+import { useMutation, useQuery } from "react-query";
+import { useNavigate } from "react-router-dom";
+import { docs } from "utils/docs";
+import { pageTitle } from "utils/page";
 import {
-  getTemplateVersionRichParameters,
-  getWorkspaceBuildParameters,
-  postWorkspaceBuild,
-} from "api/api"
-import { Workspace } from "api/typesGenerated"
-import { Helmet } from "react-helmet-async"
-import { pageTitle } from "utils/page"
-import { useWorkspaceSettingsContext } from "../WorkspaceSettingsLayout"
-import { useMutation, useQuery } from "@tanstack/react-query"
-import { Loader } from "components/Loader/Loader"
+	type WorkspacePermissions,
+	workspaceChecks,
+} from "../../WorkspacePage/permissions";
+import { useWorkspaceSettings } from "../WorkspaceSettingsLayout";
 import {
-  WorkspaceParametersFormValues,
-  WorkspaceParametersForm,
-} from "./WorkspaceParametersForm"
-import { useNavigate } from "react-router-dom"
-import { makeStyles } from "@mui/styles"
-import { PageHeader, PageHeaderTitle } from "components/PageHeader/PageHeader"
-import { displaySuccess } from "components/GlobalSnackbar/utils"
-import { FC } from "react"
+	WorkspaceParametersForm,
+	type WorkspaceParametersFormValues,
+} from "./WorkspaceParametersForm";
 
-const getWorkspaceParameters = async (workspace: Workspace) => {
-  const latestBuild = workspace.latest_build
-  const [templateVersionRichParameters, buildParameters] = await Promise.all([
-    getTemplateVersionRichParameters(latestBuild.template_version_id),
-    getWorkspaceBuildParameters(latestBuild.id),
-  ])
-  return {
-    templateVersionRichParameters,
-    buildParameters,
-  }
-}
+const WorkspaceParametersPage: FC = () => {
+	const workspace = useWorkspaceSettings();
+	const parameters = useQuery({
+		queryKey: ["workspace", workspace.id, "parameters"],
+		queryFn: () => API.getWorkspaceParameters(workspace),
+	});
+	const navigate = useNavigate();
+	const updateParameters = useMutation({
+		mutationFn: (buildParameters: WorkspaceBuildParameter[]) =>
+			API.postWorkspaceBuild(workspace.id, {
+				transition: "start",
+				rich_parameter_values: buildParameters,
+			}),
+		onSuccess: () => {
+			navigate(`/${workspace.owner_name}/${workspace.name}`);
+		},
+	});
 
-const WorkspaceParametersPage = () => {
-  const { workspace } = useWorkspaceSettingsContext()
-  const query = useQuery({
-    queryKey: ["workspaceSettings", workspace.id],
-    queryFn: () => getWorkspaceParameters(workspace),
-  })
-  const navigate = useNavigate()
-  const mutation = useMutation({
-    mutationFn: (formValues: WorkspaceParametersFormValues) =>
-      postWorkspaceBuild(workspace.id, {
-        transition: "start",
-        rich_parameter_values: formValues.rich_parameter_values,
-      }),
-    onSuccess: () => {
-      displaySuccess(
-        "Parameters updated successfully",
-        "A new build was started to apply the new parameters",
-      )
-    },
-  })
+	const templateQuery = useQuery({
+		...templateByName(workspace.organization_id, workspace.template_name ?? ""),
+		enabled: workspace !== undefined,
+	});
+	const template = templateQuery.data;
 
-  return (
-    <>
-      <Helmet>
-        <title>{pageTitle([workspace.name, "Parameters"])}</title>
-      </Helmet>
+	// Permissions
+	const checks =
+		workspace && template ? workspaceChecks(workspace, template) : {};
+	const permissionsQuery = useQuery({
+		...checkAuthorization({ checks }),
+		enabled: workspace !== undefined && template !== undefined,
+	});
+	const permissions = permissionsQuery.data as WorkspacePermissions | undefined;
+	const canChangeVersions = Boolean(permissions?.updateTemplate);
 
-      <WorkspaceParametersPageView
-        data={query.data}
-        submitError={mutation.error}
-        isSubmitting={mutation.isLoading}
-        onSubmit={mutation.mutate}
-        onCancel={() => {
-          navigate("../..")
-        }}
-      />
-    </>
-  )
-}
+	return (
+		<>
+			<Helmet>
+				<title>{pageTitle(workspace.name, "Parameters")}</title>
+			</Helmet>
+
+			<WorkspaceParametersPageView
+				workspace={workspace}
+				canChangeVersions={canChangeVersions}
+				data={parameters.data}
+				submitError={updateParameters.error}
+				isSubmitting={updateParameters.isLoading}
+				onSubmit={(values) => {
+					// When updating the parameters, the API does not accept immutable
+					// values so we need to filter them
+					const onlyMultableValues = parameters
+						.data!.templateVersionRichParameters.filter((p) => p.mutable)
+						.map(
+							(p) =>
+								values.rich_parameter_values.find((v) => v.name === p.name)!,
+						);
+					updateParameters.mutate(onlyMultableValues);
+				}}
+				onCancel={() => {
+					navigate("../..");
+				}}
+			/>
+		</>
+	);
+};
 
 export type WorkspaceParametersPageViewProps = {
-  data: Awaited<ReturnType<typeof getWorkspaceParameters>> | undefined
-  submitError: unknown
-  isSubmitting: boolean
-  onSubmit: (formValues: WorkspaceParametersFormValues) => void
-  onCancel: () => void
-}
+	workspace: Workspace;
+	canChangeVersions: boolean;
+	data: Awaited<ReturnType<typeof API.getWorkspaceParameters>> | undefined;
+	submitError: unknown;
+	isSubmitting: boolean;
+	onSubmit: (formValues: WorkspaceParametersFormValues) => void;
+	onCancel: () => void;
+};
 
 export const WorkspaceParametersPageView: FC<
-  WorkspaceParametersPageViewProps
-> = ({ data, submitError, isSubmitting, onSubmit, onCancel }) => {
-  const styles = useStyles()
+	WorkspaceParametersPageViewProps
+> = ({
+	workspace,
+	canChangeVersions,
+	data,
+	submitError,
+	onSubmit,
+	isSubmitting,
+	onCancel,
+}) => {
+	return (
+		<>
+			<PageHeader css={{ paddingTop: 0 }}>
+				<PageHeaderTitle>Workspace parameters</PageHeaderTitle>
+			</PageHeader>
 
-  return (
-    <>
-      <PageHeader className={styles.pageHeader}>
-        <PageHeaderTitle>Workspace parameters</PageHeaderTitle>
-      </PageHeader>
+			{submitError && !isApiValidationError(submitError) && (
+				<ErrorAlert error={submitError} css={{ marginBottom: 48 }} />
+			)}
 
-      {data ? (
-        <WorkspaceParametersForm
-          buildParameters={data.buildParameters}
-          templateVersionRichParameters={data.templateVersionRichParameters}
-          error={submitError}
-          isSubmitting={isSubmitting}
-          onSubmit={onSubmit}
-          onCancel={onCancel}
-        />
-      ) : (
-        <Loader />
-      )}
-    </>
-  )
-}
+			{data ? (
+				data.templateVersionRichParameters.length > 0 ? (
+					<WorkspaceParametersForm
+						workspace={workspace}
+						canChangeVersions={canChangeVersions}
+						autofillParams={data.buildParameters.map((p) => ({
+							...p,
+							source: "active_build",
+						}))}
+						templateVersionRichParameters={data.templateVersionRichParameters}
+						error={submitError}
+						isSubmitting={isSubmitting}
+						onSubmit={onSubmit}
+						onCancel={onCancel}
+					/>
+				) : (
+					<EmptyState
+						message="This workspace has no parameters"
+						cta={
+							<Button
+								component="a"
+								href={docs("/admin/templates/extending-templates/parameters")}
+								startIcon={<OpenInNewOutlined />}
+								variant="contained"
+								target="_blank"
+								rel="noreferrer"
+							>
+								Learn more about parameters
+							</Button>
+						}
+						css={(theme) => ({
+							border: `1px solid ${theme.palette.divider}`,
+							borderRadius: 8,
+						})}
+					/>
+				)
+			) : (
+				<Loader />
+			)}
+		</>
+	);
+};
 
-const useStyles = makeStyles(() => ({
-  pageHeader: {
-    paddingTop: 0,
-  },
-}))
-
-export default WorkspaceParametersPage
+export default WorkspaceParametersPage;

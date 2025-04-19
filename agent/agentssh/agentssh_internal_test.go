@@ -10,14 +10,14 @@ import (
 	"testing"
 
 	gliderssh "github.com/gliderlabs/ssh"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/pty"
-	"github.com/coder/coder/testutil"
-
-	"cdr.dev/slog/sloggers/slogtest"
+	"github.com/coder/coder/v2/agent/agentexec"
+	"github.com/coder/coder/v2/pty"
+	"github.com/coder/coder/v2/testutil"
 )
 
 const longScript = `
@@ -35,9 +35,12 @@ func Test_sessionStart_orphan(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitMedium)
 	defer cancel()
-	logger := slogtest.Make(t, nil)
-	s, err := NewServer(ctx, logger, afero.NewMemMapFs(), 0, "")
+	logger := testutil.Logger(t)
+	s, err := NewServer(ctx, logger, prometheus.NewRegistry(), afero.NewMemMapFs(), agentexec.DefaultExecer, nil)
 	require.NoError(t, err)
+	defer s.Close()
+	err = s.UpdateHostSigner(42)
+	assert.NoError(t, err)
 
 	// Here we're going to call the handler directly with a faked SSH session
 	// that just uses io.Pipes instead of a network socket.  There is a large
@@ -57,10 +60,11 @@ func Test_sessionStart_orphan(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+
 		// we don't really care what the error is here.  In the larger scenario,
 		// the client has disconnected, so we can't return any error information
 		// to them.
-		_ = s.startPTYSession(sess, cmd, ptyInfo, windowSize)
+		_ = s.startPTYSession(logger, sess, "ssh", cmd, ptyInfo, windowSize)
 	}()
 
 	readDone := make(chan struct{})
@@ -111,6 +115,11 @@ type testSSHContext struct {
 	context.Context
 }
 
+var (
+	_ gliderssh.Context = testSSHContext{}
+	_ ptySession        = &testSession{}
+)
+
 func newTestSession(ctx context.Context) (toClient *io.PipeReader, fromClient *io.PipeWriter, s ptySession) {
 	toClient, fromPty := io.Pipe()
 	toPty, fromClient := io.Pipe()
@@ -139,6 +148,10 @@ func (s *testSession) Read(p []byte) (n int, err error) {
 
 func (s *testSession) Write(p []byte) (n int, err error) {
 	return s.fromPty.Write(p)
+}
+
+func (*testSession) Signals(_ chan<- gliderssh.Signal) {
+	// Not implemented, but will be called.
 }
 
 func (testSSHContext) Lock() {
@@ -186,5 +199,9 @@ func (testSSHContext) Permissions() *gliderssh.Permissions {
 
 // SetValue allows you to easily write new values into the underlying context.
 func (testSSHContext) SetValue(_, _ interface{}) {
+	panic("not implemented")
+}
+
+func (testSSHContext) KeepAlive() *gliderssh.SessionKeepAlive {
 	panic("not implemented")
 }

@@ -1,34 +1,33 @@
-Usage: coder templates
+coder v0.0.0-devel
 
-Manage templates
+USAGE:
+  coder templates
 
-Aliases: template
+  Manage templates
 
-Templates are written in standard Terraform and describe the infrastructure for workspaces
-  - Create a template for developers to create workspaces:                      
+  Aliases: template
 
-      [;m$ coder templates create[0m 
+  Templates are written in standard Terraform and describe the infrastructure
+  for workspaces
+    - Create or push an update to the template. Your developers can update their
+  workspaces:
+  
+       $ coder templates push my-template
 
-  - Make changes to your template, and plan the changes:                        
-
-      [;m$ coder templates plan my-template[0m 
-
-  - Push an update to the template. Your developers can update their workspaces:
-
-      [;m$ coder templates push my-template[0m
-
-[1mSubcommands[0m
-    create      Create a template from the current directory or as specified by
-                flag
+SUBCOMMANDS:
+    archive     Archive unused or failed template versions from a given
+                template(s)
+    create      DEPRECATED: Create a template from the current directory or as
+                specified by flag
     delete      Delete templates
     edit        Edit the metadata of a template by name.
     init        Get started with a templated template.
     list        List all the templates available for the organization
-    plan        Plan a template push from the current directory
-    pull        Download the latest version of a template to a path.
-    push        Push a new template version from the current directory or as
+    pull        Download the active, latest, or specified version of a template
+                to a path.
+    push        Create or update a template from the current directory or as
                 specified by flag
     versions    Manage different versions of the specified template
 
----
+———
 Run `coder --help` for a list of global options.

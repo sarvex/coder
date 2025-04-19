@@ -1,181 +1,134 @@
 package coderd_test
 
 import (
-	"context"
-	"net/http"
+	"os"
 	"testing"
-
-	"github.com/coder/coder/provisioner/echo"
-	"github.com/coder/coder/provisionersdk/proto"
-	"github.com/coder/coder/testutil"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/coderd/coderdtest"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/coderd/coderdtest"
+	"github.com/coder/coder/v2/coderd/rbac"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/provisioner/echo"
+	"github.com/coder/coder/v2/provisionersdk/proto"
+	"github.com/coder/coder/v2/testutil"
+	"github.com/coder/websocket"
 )
 
-func TestPostParameter(t *testing.T) {
+func TestDynamicParametersOwnerGroups(t *testing.T) {
 	t.Parallel()
-	t.Run("BadScope", func(t *testing.T) {
-		t.Parallel()
-		client := coderdtest.New(t, nil)
-		user := coderdtest.CreateFirstUser(t, client)
 
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
+	cfg := coderdtest.DeploymentValues(t)
+	cfg.Experiments = []string{string(codersdk.ExperimentDynamicParameters)}
+	ownerClient := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true, DeploymentValues: cfg})
+	owner := coderdtest.CreateFirstUser(t, ownerClient)
+	templateAdmin, templateAdminUser := coderdtest.CreateAnotherUser(t, ownerClient, owner.OrganizationID, rbac.RoleTemplateAdmin())
 
-		_, err := client.CreateParameter(ctx, codersdk.ParameterScope("something"), user.OrganizationID, codersdk.CreateParameterRequest{
-			Name:              "example",
-			SourceValue:       "tomato",
-			SourceScheme:      codersdk.ParameterSourceSchemeData,
-			DestinationScheme: codersdk.ParameterDestinationSchemeProvisionerVariable,
-		})
-		var apiErr *codersdk.Error
-		require.ErrorAs(t, err, &apiErr)
-		require.Equal(t, http.StatusBadRequest, apiErr.StatusCode())
+	dynamicParametersTerraformSource, err := os.ReadFile("testdata/parameters/groups/main.tf")
+	require.NoError(t, err)
+	dynamicParametersTerraformPlan, err := os.ReadFile("testdata/parameters/groups/plan.json")
+	require.NoError(t, err)
+
+	files := echo.WithExtraFiles(map[string][]byte{
+		"main.tf": dynamicParametersTerraformSource,
 	})
-
-	t.Run("Create", func(t *testing.T) {
-		t.Parallel()
-		client := coderdtest.New(t, nil)
-		user := coderdtest.CreateFirstUser(t, client)
-		template := createTemplate(t, client, user)
-
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
-
-		_, err := client.CreateParameter(ctx, codersdk.ParameterTemplate, template.ID, codersdk.CreateParameterRequest{
-			Name:              "example",
-			SourceValue:       "tomato",
-			SourceScheme:      codersdk.ParameterSourceSchemeData,
-			DestinationScheme: codersdk.ParameterDestinationSchemeProvisionerVariable,
-		})
-		require.NoError(t, err)
-	})
-
-	t.Run("AlreadyExists", func(t *testing.T) {
-		t.Parallel()
-		client := coderdtest.New(t, nil)
-		user := coderdtest.CreateFirstUser(t, client)
-		template := createTemplate(t, client, user)
-
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
-
-		_, err := client.CreateParameter(ctx, codersdk.ParameterTemplate, template.ID, codersdk.CreateParameterRequest{
-			Name:              "example",
-			SourceValue:       "tomato",
-			SourceScheme:      codersdk.ParameterSourceSchemeData,
-			DestinationScheme: codersdk.ParameterDestinationSchemeProvisionerVariable,
-		})
-		require.NoError(t, err)
-
-		_, err = client.CreateParameter(ctx, codersdk.ParameterTemplate, template.ID, codersdk.CreateParameterRequest{
-			Name:              "example",
-			SourceValue:       "tomato",
-			SourceScheme:      codersdk.ParameterSourceSchemeData,
-			DestinationScheme: codersdk.ParameterDestinationSchemeProvisionerVariable,
-		})
-		var apiErr *codersdk.Error
-		require.ErrorAs(t, err, &apiErr)
-		require.Equal(t, http.StatusConflict, apiErr.StatusCode())
-	})
-}
-
-func TestParameters(t *testing.T) {
-	t.Parallel()
-	t.Run("ListEmpty", func(t *testing.T) {
-		t.Parallel()
-		client := coderdtest.New(t, nil)
-		user := coderdtest.CreateFirstUser(t, client)
-		template := createTemplate(t, client, user)
-
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
-
-		_, err := client.Parameters(ctx, codersdk.ParameterTemplate, template.ID)
-		require.NoError(t, err)
-	})
-	t.Run("List", func(t *testing.T) {
-		t.Parallel()
-		client := coderdtest.New(t, nil)
-		user := coderdtest.CreateFirstUser(t, client)
-		template := createTemplate(t, client, user)
-
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
-
-		_, err := client.CreateParameter(ctx, codersdk.ParameterTemplate, template.ID, codersdk.CreateParameterRequest{
-			Name:              "example",
-			SourceValue:       "tomato",
-			SourceScheme:      codersdk.ParameterSourceSchemeData,
-			DestinationScheme: codersdk.ParameterDestinationSchemeProvisionerVariable,
-		})
-		require.NoError(t, err)
-		params, err := client.Parameters(ctx, codersdk.ParameterTemplate, template.ID)
-		require.NoError(t, err)
-		require.Len(t, params, 1)
-	})
-}
-
-func TestDeleteParameter(t *testing.T) {
-	t.Parallel()
-	t.Run("NotExist", func(t *testing.T) {
-		t.Parallel()
-		client := coderdtest.New(t, nil)
-		user := coderdtest.CreateFirstUser(t, client)
-		template := createTemplate(t, client, user)
-
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
-
-		err := client.DeleteParameter(ctx, codersdk.ParameterTemplate, template.ID, "something")
-		var apiErr *codersdk.Error
-		require.ErrorAs(t, err, &apiErr)
-		require.Equal(t, http.StatusNotFound, apiErr.StatusCode())
-	})
-	t.Run("Delete", func(t *testing.T) {
-		t.Parallel()
-		client := coderdtest.New(t, nil)
-		user := coderdtest.CreateFirstUser(t, client)
-		template := createTemplate(t, client, user)
-
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
-
-		param, err := client.CreateParameter(ctx, codersdk.ParameterTemplate, template.ID, codersdk.CreateParameterRequest{
-			Name:              "example",
-			SourceValue:       "tomato",
-			SourceScheme:      codersdk.ParameterSourceSchemeData,
-			DestinationScheme: codersdk.ParameterDestinationSchemeProvisionerVariable,
-		})
-		require.NoError(t, err)
-		err = client.DeleteParameter(ctx, codersdk.ParameterTemplate, template.ID, param.Name)
-		require.NoError(t, err)
-	})
-}
-
-func createTemplate(t *testing.T, client *codersdk.Client, user codersdk.CreateFirstUserResponse) codersdk.Template {
-	instanceID := "instanceidentifier"
-	version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
-		Parse: echo.ParseComplete,
-		ProvisionApply: []*proto.Provision_Response{{
-			Type: &proto.Provision_Response_Complete{
-				Complete: &proto.Provision_Complete{
-					Resources: []*proto.Resource{{
-						Name: "somename",
-						Type: "someinstance",
-						Agents: []*proto.Agent{{
-							Auth: &proto.Agent_InstanceId{
-								InstanceId: instanceID,
-							},
-						}},
-					}},
-				},
+	files.ProvisionPlan = []*proto.Response{{
+		Type: &proto.Response_Plan{
+			Plan: &proto.PlanComplete{
+				Plan: dynamicParametersTerraformPlan,
 			},
-		}},
+		},
+	}}
+
+	version := coderdtest.CreateTemplateVersion(t, templateAdmin, owner.OrganizationID, files)
+	coderdtest.AwaitTemplateVersionJobCompleted(t, templateAdmin, version.ID)
+	_ = coderdtest.CreateTemplate(t, templateAdmin, owner.OrganizationID, version.ID)
+
+	ctx := testutil.Context(t, testutil.WaitShort)
+	stream, err := templateAdmin.TemplateVersionDynamicParameters(ctx, templateAdminUser.ID, version.ID)
+	require.NoError(t, err)
+	defer stream.Close(websocket.StatusGoingAway)
+
+	previews := stream.Chan()
+
+	// Should automatically send a form state with all defaulted/empty values
+	preview := testutil.RequireReceive(ctx, t, previews)
+	require.Equal(t, -1, preview.ID)
+	require.Empty(t, preview.Diagnostics)
+	require.Equal(t, "group", preview.Parameters[0].Name)
+	require.True(t, preview.Parameters[0].Value.Valid())
+	require.Equal(t, "Everyone", preview.Parameters[0].Value.Value.AsString())
+
+	// Send a new value, and see it reflected
+	err = stream.Send(codersdk.DynamicParametersRequest{
+		ID:     1,
+		Inputs: map[string]string{"group": "Bloob"},
 	})
-	template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
-	return template
+	require.NoError(t, err)
+	preview = testutil.RequireReceive(ctx, t, previews)
+	require.Equal(t, 1, preview.ID)
+	require.Empty(t, preview.Diagnostics)
+	require.Equal(t, "group", preview.Parameters[0].Name)
+	require.True(t, preview.Parameters[0].Value.Valid())
+	require.Equal(t, "Bloob", preview.Parameters[0].Value.Value.AsString())
+
+	// Back to default
+	err = stream.Send(codersdk.DynamicParametersRequest{
+		ID:     3,
+		Inputs: map[string]string{},
+	})
+	require.NoError(t, err)
+	preview = testutil.RequireReceive(ctx, t, previews)
+	require.Equal(t, 3, preview.ID)
+	require.Empty(t, preview.Diagnostics)
+	require.Equal(t, "group", preview.Parameters[0].Name)
+	require.True(t, preview.Parameters[0].Value.Valid())
+	require.Equal(t, "Everyone", preview.Parameters[0].Value.Value.AsString())
+}
+
+func TestDynamicParametersOwnerSSHPublicKey(t *testing.T) {
+	t.Parallel()
+
+	cfg := coderdtest.DeploymentValues(t)
+	cfg.Experiments = []string{string(codersdk.ExperimentDynamicParameters)}
+	ownerClient := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true, DeploymentValues: cfg})
+	owner := coderdtest.CreateFirstUser(t, ownerClient)
+	templateAdmin, templateAdminUser := coderdtest.CreateAnotherUser(t, ownerClient, owner.OrganizationID, rbac.RoleTemplateAdmin())
+
+	dynamicParametersTerraformSource, err := os.ReadFile("testdata/parameters/public_key/main.tf")
+	require.NoError(t, err)
+	dynamicParametersTerraformPlan, err := os.ReadFile("testdata/parameters/public_key/plan.json")
+	require.NoError(t, err)
+	sshKey, err := templateAdmin.GitSSHKey(t.Context(), "me")
+	require.NoError(t, err)
+
+	files := echo.WithExtraFiles(map[string][]byte{
+		"main.tf": dynamicParametersTerraformSource,
+	})
+	files.ProvisionPlan = []*proto.Response{{
+		Type: &proto.Response_Plan{
+			Plan: &proto.PlanComplete{
+				Plan: dynamicParametersTerraformPlan,
+			},
+		},
+	}}
+
+	version := coderdtest.CreateTemplateVersion(t, templateAdmin, owner.OrganizationID, files)
+	coderdtest.AwaitTemplateVersionJobCompleted(t, templateAdmin, version.ID)
+	_ = coderdtest.CreateTemplate(t, templateAdmin, owner.OrganizationID, version.ID)
+
+	ctx := testutil.Context(t, testutil.WaitShort)
+	stream, err := templateAdmin.TemplateVersionDynamicParameters(ctx, templateAdminUser.ID, version.ID)
+	require.NoError(t, err)
+	defer stream.Close(websocket.StatusGoingAway)
+
+	previews := stream.Chan()
+
+	// Should automatically send a form state with all defaulted/empty values
+	preview := testutil.RequireReceive(ctx, t, previews)
+	require.Equal(t, -1, preview.ID)
+	require.Empty(t, preview.Diagnostics)
+	require.Equal(t, "public_key", preview.Parameters[0].Name)
+	require.True(t, preview.Parameters[0].Value.Valid())
+	require.Equal(t, sshKey.PublicKey, preview.Parameters[0].Value.Value.AsString())
 }

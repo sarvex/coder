@@ -9,15 +9,22 @@ import (
 	"testing"
 
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/coderd/tracing"
-	"github.com/coder/coder/testutil"
+	"github.com/coder/coder/v2/coderd/tracing"
+	"github.com/coder/coder/v2/testutil"
 )
 
+// noopTracer is just an alias because the fakeTracer implements a method
+// with the same name 'Tracer'. Kinda dumb, but this is a workaround.
+type noopTracer = noop.Tracer
+
 type fakeTracer struct {
+	noop.TracerProvider
+	noopTracer
 	startCalled int64
 }
 
@@ -59,7 +66,7 @@ func Test_Middleware(t *testing.T) {
 			{"/%40hi/hi/apps/hi", true},
 			{"/%40hi/hi/apps/hi/hi", true},
 			{"/%40hi/hi/apps/hi/hi", true},
-			{"/gitauth/hi/callback", true},
+			{"/external-auth/hi/callback", true},
 
 			// Other routes that should not be collected.
 			{"/index.html", false},

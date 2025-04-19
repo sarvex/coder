@@ -1,30 +1,15 @@
-import { action } from "@storybook/addon-actions"
-import { Story } from "@storybook/react"
-import { UseTabResult } from "hooks/useTab"
+import type { Meta, StoryObj } from "@storybook/react";
 import {
-  mockApiError,
-  MockOrganization,
-  MockTemplate,
-  MockTemplateVersion,
-} from "testHelpers/entities"
+	MockTemplate,
+	MockTemplateVersion,
+	MockTemplateVersionWithMarkdownMessage,
+	mockApiError,
+} from "testHelpers/entities";
+import { withDashboardProvider } from "testHelpers/storybook";
 import {
-  TemplateVersionPageView,
-  TemplateVersionPageViewProps,
-} from "./TemplateVersionPageView"
-
-export default {
-  title: "pages/TemplateVersionPageView",
-  component: TemplateVersionPageView,
-}
-
-const Template: Story<TemplateVersionPageViewProps> = (args) => (
-  <TemplateVersionPageView {...args} />
-)
-
-const tab: UseTabResult = {
-  value: "0",
-  set: action("changeTab"),
-}
+	TemplateVersionPageView,
+	type TemplateVersionPageViewProps,
+} from "./TemplateVersionPageView";
 
 const readmeContent = `---
 name:Template test
@@ -35,36 +20,48 @@ You can add instructions here
 [Some link info](https://coder.com)
 \`\`\`
 # This is a really long sentence to test that the code block wraps into a new line properly.
-\`\`\``
+\`\`\``;
 
 const defaultArgs: TemplateVersionPageViewProps = {
-  tab,
-  templateName: MockTemplate.name,
-  versionName: MockTemplateVersion.name,
-  context: {
-    templateName: MockTemplate.name,
-    orgId: MockOrganization.id,
-    versionName: MockTemplateVersion.name,
-    currentVersion: MockTemplateVersion,
-    currentFiles: {
-      "README.md": readmeContent,
-      "main.tf": `{}`,
-    },
-  },
-}
+	organizationName: MockTemplate.organization_name,
+	templateName: MockTemplate.name,
+	versionName: MockTemplateVersion.name,
+	currentVersion: MockTemplateVersion,
+	currentFiles: {
+		"README.md": readmeContent,
+		"main.tf": "{}",
+		"some.tpl": "{{.Name}}",
+		"some.sh": `echo "Hello world"`,
+	},
+	baseFiles: undefined,
+	error: undefined,
+};
 
-export const Default = Template.bind({})
-Default.args = defaultArgs
+const meta: Meta<typeof TemplateVersionPageView> = {
+	title: "pages/TemplateVersionPage",
+	decorators: [withDashboardProvider],
+	component: TemplateVersionPageView,
+	args: defaultArgs,
+};
 
-export const Error = Template.bind({})
-Error.args = {
-  ...defaultArgs,
-  context: {
-    ...defaultArgs.context,
-    currentVersion: undefined,
-    currentFiles: undefined,
-    error: mockApiError({
-      message: "Error on loading the template version",
-    }),
-  },
-}
+export default meta;
+type Story = StoryObj<typeof TemplateVersionPageView>;
+
+export const Default: Story = {};
+
+export const LongVersionMessage: Story = {
+	args: {
+		currentVersion: MockTemplateVersionWithMarkdownMessage,
+	},
+};
+
+export const WithError: Story = {
+	args: {
+		...defaultArgs,
+		currentVersion: undefined,
+		currentFiles: undefined,
+		error: mockApiError({
+			message: "Error on loading the template version",
+		}),
+	},
+};

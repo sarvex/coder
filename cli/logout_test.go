@@ -8,10 +8,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/cli/clitest"
-	"github.com/coder/coder/cli/config"
-	"github.com/coder/coder/coderd/coderdtest"
-	"github.com/coder/coder/pty/ptytest"
+	"github.com/coder/coder/v2/cli/clitest"
+	"github.com/coder/coder/v2/cli/config"
+	"github.com/coder/coder/v2/coderd/coderdtest"
+	"github.com/coder/coder/v2/pty/ptytest"
 )
 
 func TestLogout(t *testing.T) {
@@ -92,33 +92,6 @@ func TestLogout(t *testing.T) {
 		go func() {
 			defer close(logoutChan)
 			err := logout.Run()
-			assert.ErrorContains(t, err, "You are not logged in. Try logging in using 'coder login <url>'.")
-		}()
-
-		<-logoutChan
-	})
-	t.Run("NoSessionFile", func(t *testing.T) {
-		t.Parallel()
-
-		pty := ptytest.New(t)
-		config := login(t, pty)
-
-		// Ensure session files exist.
-		require.FileExists(t, string(config.URL()))
-		require.FileExists(t, string(config.Session()))
-
-		err := os.Remove(string(config.Session()))
-		require.NoError(t, err)
-
-		logoutChan := make(chan struct{})
-		logout, _ := clitest.New(t, "logout", "--global-config", string(config))
-
-		logout.Stdin = pty.Input()
-		logout.Stdout = pty.Output()
-
-		go func() {
-			defer close(logoutChan)
-			err = logout.Run()
 			assert.ErrorContains(t, err, "You are not logged in. Try logging in using 'coder login <url>'.")
 		}()
 

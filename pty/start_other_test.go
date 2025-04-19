@@ -3,6 +3,7 @@
 package pty_test
 
 import (
+	"os"
 	"os/exec"
 	"testing"
 
@@ -12,12 +13,13 @@ import (
 	"go.uber.org/goleak"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/pty"
-	"github.com/coder/coder/pty/ptytest"
+	"github.com/coder/coder/v2/pty"
+	"github.com/coder/coder/v2/pty/ptytest"
+	"github.com/coder/coder/v2/testutil"
 )
 
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	goleak.VerifyTestMain(m, testutil.GoleakOptions...)
 }
 
 func TestStart(t *testing.T) {
@@ -46,6 +48,19 @@ func TestStart(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("Interrupt", func(t *testing.T) {
+		t.Parallel()
+		pty, ps := ptytest.Start(t, pty.Command("sleep", "30"))
+		err := ps.Signal(os.Interrupt)
+		assert.NoError(t, err)
+		err = ps.Wait()
+		var exitErr *exec.ExitError
+		require.True(t, xerrors.As(err, &exitErr))
+		assert.NotEqual(t, 0, exitErr.ExitCode())
+		err = pty.Close()
+		require.NoError(t, err)
+	})
+
 	t.Run("SSH_TTY", func(t *testing.T) {
 		t.Parallel()
 		opts := pty.WithPTYOption(pty.WithSSHRequest(ssh.Pty{
@@ -54,7 +69,7 @@ func TestStart(t *testing.T) {
 				Height: 24,
 			},
 		}))
-		pty, ps := ptytest.Start(t, pty.Command("env"), opts)
+		pty, ps := ptytest.Start(t, pty.Command(`/bin/sh`, `-c`, `env | grep SSH_TTY`), opts)
 		pty.ExpectMatch("SSH_TTY=/dev/")
 		err := ps.Wait()
 		require.NoError(t, err)

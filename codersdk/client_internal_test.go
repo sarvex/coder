@@ -27,7 +27,8 @@ import (
 
 	"cdr.dev/slog"
 	"cdr.dev/slog/sloggers/sloghuman"
-	"github.com/coder/coder/testutil"
+
+	"github.com/coder/coder/v2/testutil"
 )
 
 const jsonCT = "application/json"
@@ -114,8 +115,8 @@ func Test_Client(t *testing.T) {
 	client.SetSessionToken(token)
 
 	logBuf := bytes.NewBuffer(nil)
-	client.Logger = slog.Make(sloghuman.Sink(logBuf)).Leveled(slog.LevelDebug)
-	client.LogBodies = true
+	client.SetLogger(slog.Make(sloghuman.Sink(logBuf)).Leveled(slog.LevelDebug))
+	client.SetLogBodies(true)
 
 	// Setup tracing.
 	res := resource.NewWithAttributes(
@@ -281,6 +282,17 @@ func Test_readBodyAsError(t *testing.T) {
 				assert.Contains(t, sdkErr.Response.Message, "unexpected status code")
 				assert.Contains(t, sdkErr.Response.Message, "has no message")
 				assert.Equal(t, unexpectedJSON, sdkErr.Response.Detail)
+			},
+		},
+		{
+			// Even status code 200 should be considered an error if this function
+			// is called. There are parts of the code that require this function
+			// to always return an error.
+			name: "OKResp",
+			req:  nil,
+			res:  newResponse(http.StatusOK, jsonCT, marshal(map[string]any{})),
+			assert: func(t *testing.T, err error) {
+				require.Error(t, err)
 			},
 		},
 	}

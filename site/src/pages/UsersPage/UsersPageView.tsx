@@ -1,90 +1,119 @@
-import { PaginationWidget } from "components/PaginationWidget/PaginationWidget"
-import { FC } from "react"
-import { PaginationMachineRef } from "xServices/pagination/paginationXService"
-import * as TypesGen from "../../api/typesGenerated"
-import { SearchBarWithFilter } from "../../components/SearchBarWithFilter/SearchBarWithFilter"
-import { UsersTable } from "../../components/UsersTable/UsersTable"
-import { userFilterQuery } from "../../utils/filters"
+import type { GroupsByUserId } from "api/queries/groups";
+import type * as TypesGen from "api/typesGenerated";
+import { Button } from "components/Button/Button";
+import {
+	PaginationContainer,
+	type PaginationResult,
+} from "components/PaginationWidget/PaginationContainer";
+import {
+	SettingsHeader,
+	SettingsHeaderDescription,
+	SettingsHeaderTitle,
+} from "components/SettingsHeader/SettingsHeader";
+import { Stack } from "components/Stack/Stack";
+import { UserPlusIcon } from "lucide-react";
+import type { ComponentProps, FC } from "react";
+import { Link as RouterLink } from "react-router-dom";
+import { UsersFilter } from "./UsersFilter";
+import { UsersTable } from "./UsersTable/UsersTable";
 
-export const Language = {
-  activeUsersFilterName: "Active users",
-  allUsersFilterName: "All users",
-}
 export interface UsersPageViewProps {
-  users?: TypesGen.User[]
-  count?: number
-  roles?: TypesGen.AssignableRoles[]
-  filter?: string
-  error?: unknown
-  isUpdatingUserRoles?: boolean
-  canEditUsers?: boolean
-  isLoading?: boolean
-  onSuspendUser: (user: TypesGen.User) => void
-  onDeleteUser: (user: TypesGen.User) => void
-  onListWorkspaces: (user: TypesGen.User) => void
-  onActivateUser: (user: TypesGen.User) => void
-  onResetUserPassword: (user: TypesGen.User) => void
-  onUpdateUserRoles: (
-    user: TypesGen.User,
-    roles: TypesGen.Role["name"][],
-  ) => void
-  onFilter: (query: string) => void
-  paginationRef: PaginationMachineRef
-  isNonInitialPage: boolean
-  actorID: string
+	users?: readonly TypesGen.User[];
+	roles?: TypesGen.AssignableRoles[];
+	isUpdatingUserRoles?: boolean;
+	canEditUsers: boolean;
+	oidcRoleSyncEnabled: boolean;
+	canViewActivity?: boolean;
+	isLoading: boolean;
+	authMethods?: TypesGen.AuthMethods;
+	onSuspendUser: (user: TypesGen.User) => void;
+	onDeleteUser: (user: TypesGen.User) => void;
+	onListWorkspaces: (user: TypesGen.User) => void;
+	onViewActivity: (user: TypesGen.User) => void;
+	onActivateUser: (user: TypesGen.User) => void;
+	onResetUserPassword: (user: TypesGen.User) => void;
+	onUpdateUserRoles: (
+		userId: string,
+		roles: TypesGen.SlimRole["name"][],
+	) => void;
+	filterProps: ComponentProps<typeof UsersFilter>;
+	isNonInitialPage: boolean;
+	actorID: string;
+	groupsByUserId: GroupsByUserId | undefined;
+	usersQuery: PaginationResult;
+
+	// TODO: Refactor these out once we remove the multi-organization experiment.
+	canViewOrganizations?: boolean;
+	canCreateUser?: boolean;
 }
 
-export const UsersPageView: FC<React.PropsWithChildren<UsersPageViewProps>> = ({
-  users,
-  count,
-  roles,
-  onSuspendUser,
-  onDeleteUser,
-  onListWorkspaces,
-  onActivateUser,
-  onResetUserPassword,
-  onUpdateUserRoles,
-  error,
-  isUpdatingUserRoles,
-  canEditUsers,
-  isLoading,
-  filter,
-  onFilter,
-  paginationRef,
-  isNonInitialPage,
-  actorID,
+export const UsersPageView: FC<UsersPageViewProps> = ({
+	users,
+	roles,
+	onSuspendUser,
+	onDeleteUser,
+	onListWorkspaces,
+	onViewActivity,
+	onActivateUser,
+	onResetUserPassword,
+	onUpdateUserRoles,
+	isUpdatingUserRoles,
+	canEditUsers,
+	oidcRoleSyncEnabled,
+	canViewActivity,
+	isLoading,
+	filterProps,
+	isNonInitialPage,
+	actorID,
+	authMethods,
+	groupsByUserId,
+	usersQuery,
+	canCreateUser,
 }) => {
-  const presetFilters = [
-    { query: userFilterQuery.active, name: Language.activeUsersFilterName },
-    { query: userFilterQuery.all, name: Language.allUsersFilterName },
-  ]
+	return (
+		<>
+			<SettingsHeader
+				actions={
+					canCreateUser && (
+						<Button asChild>
+							<RouterLink to="create">
+								<UserPlusIcon />
+								Create user
+							</RouterLink>
+						</Button>
+					)
+				}
+			>
+				<SettingsHeaderTitle>Users</SettingsHeaderTitle>
+				<SettingsHeaderDescription>
+					Manage user accounts and permissions.
+				</SettingsHeaderDescription>
+			</SettingsHeader>
 
-  return (
-    <>
-      <SearchBarWithFilter
-        filter={filter}
-        onFilter={onFilter}
-        presetFilters={presetFilters}
-        error={error}
-      />
+			<UsersFilter {...filterProps} />
 
-      <UsersTable
-        users={users}
-        roles={roles}
-        onSuspendUser={onSuspendUser}
-        onDeleteUser={onDeleteUser}
-        onListWorkspaces={onListWorkspaces}
-        onActivateUser={onActivateUser}
-        onResetUserPassword={onResetUserPassword}
-        onUpdateUserRoles={onUpdateUserRoles}
-        isUpdatingUserRoles={isUpdatingUserRoles}
-        canEditUsers={canEditUsers}
-        isLoading={isLoading}
-        isNonInitialPage={isNonInitialPage}
-        actorID={actorID}
-      />
-
-      <PaginationWidget numRecords={count} paginationRef={paginationRef} />
-    </>
-  )
-}
+			<PaginationContainer query={usersQuery} paginationUnitLabel="users">
+				<UsersTable
+					users={users}
+					roles={roles}
+					groupsByUserId={groupsByUserId}
+					onSuspendUser={onSuspendUser}
+					onDeleteUser={onDeleteUser}
+					onListWorkspaces={onListWorkspaces}
+					onViewActivity={onViewActivity}
+					onActivateUser={onActivateUser}
+					onResetUserPassword={onResetUserPassword}
+					onUpdateUserRoles={onUpdateUserRoles}
+					isUpdatingUserRoles={isUpdatingUserRoles}
+					canEditUsers={canEditUsers}
+					oidcRoleSyncEnabled={oidcRoleSyncEnabled}
+					canViewActivity={canViewActivity}
+					isLoading={isLoading}
+					isNonInitialPage={isNonInitialPage}
+					actorID={actorID}
+					authMethods={authMethods}
+				/>
+			</PaginationContainer>
+		</>
+	);
+};

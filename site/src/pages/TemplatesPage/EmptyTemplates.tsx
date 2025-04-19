@@ -1,144 +1,132 @@
-import Button from "@mui/material/Button"
-import Link from "@mui/material/Link"
-import { makeStyles } from "@mui/styles"
-import { TemplateExample } from "api/typesGenerated"
-import { CodeExample } from "components/CodeExample/CodeExample"
-import { Stack } from "components/Stack/Stack"
-import { TableEmpty } from "components/TableEmpty/TableEmpty"
-import { TemplateExampleCard } from "components/TemplateExampleCard/TemplateExampleCard"
-import { FC } from "react"
-import { useTranslation } from "react-i18next"
-import { Link as RouterLink } from "react-router-dom"
-import { Permissions } from "xServices/auth/authXService"
+import type { Interpolation, Theme } from "@emotion/react";
+import Button from "@mui/material/Button";
+import Link from "@mui/material/Link";
+import type { TemplateExample } from "api/typesGenerated";
+import { CodeExample } from "components/CodeExample/CodeExample";
+import { Stack } from "components/Stack/Stack";
+import { TableEmpty } from "components/TableEmpty/TableEmpty";
+import { TemplateExampleCard } from "modules/templates/TemplateExampleCard/TemplateExampleCard";
+import type { FC } from "react";
+import { Link as RouterLink } from "react-router-dom";
+import { docs } from "utils/docs";
 
 // Those are from https://github.com/coder/coder/tree/main/examples/templates
 const featuredExampleIds = [
-  "docker",
-  "kubernetes",
-  "aws-linux",
-  "aws-windows",
-  "gcp-linux",
-  "gcp-windows",
-]
+	"docker",
+	"kubernetes",
+	"aws-linux",
+	"aws-windows",
+	"gcp-linux",
+	"gcp-windows",
+];
 
 const findFeaturedExamples = (examples: TemplateExample[]) => {
-  const featuredExamples: TemplateExample[] = []
+	const featuredExamples: TemplateExample[] = [];
 
-  // We loop the featuredExampleIds first to keep the order
-  featuredExampleIds.forEach((exampleId) => {
-    examples.forEach((example) => {
-      if (exampleId === example.id) {
-        featuredExamples.push(example)
-      }
-    })
-  })
+	// We loop the featuredExampleIds first to keep the order
+	for (const exampleId of featuredExampleIds) {
+		for (const example of examples) {
+			if (exampleId === example.id) {
+				featuredExamples.push(example);
+			}
+		}
+	}
 
-  return featuredExamples
+	return featuredExamples;
+};
+
+interface EmptyTemplatesProps {
+	canCreateTemplates: boolean;
+	examples: TemplateExample[];
+	isUsingFilter: boolean;
 }
 
-export const EmptyTemplates: FC<{
-  permissions: Permissions
-  examples: TemplateExample[]
-}> = ({ permissions, examples }) => {
-  const styles = useStyles()
-  const { t } = useTranslation("templatesPage")
-  const featuredExamples = findFeaturedExamples(examples)
+export const EmptyTemplates: FC<EmptyTemplatesProps> = ({
+	canCreateTemplates,
+	examples,
+	isUsingFilter,
+}) => {
+	if (isUsingFilter) {
+		return <TableEmpty message="No results matched your search" />;
+	}
 
-  if (permissions.createTemplates) {
-    return (
-      <TableEmpty
-        message={t("empty.message")}
-        description={
-          <>
-            You can create a template using our starter templates or{" "}
-            <Link component={RouterLink} to="/new">
-              uploading a template
-            </Link>
-            . You can also{" "}
-            <Link
-              href="https://coder.com/docs/coder-oss/latest/templates#add-a-template"
-              target="_blank"
-              rel="noreferrer"
-            >
-              use the CLI
-            </Link>
-            .
-          </>
-        }
-        cta={
-          <Stack alignItems="center" spacing={4}>
-            <div className={styles.featuredExamples}>
-              {featuredExamples.map((example) => (
-                <TemplateExampleCard
-                  example={example}
-                  key={example.id}
-                  className={styles.template}
-                />
-              ))}
-            </div>
+	const featuredExamples = findFeaturedExamples(examples);
 
-            <Button
-              size="small"
-              component={RouterLink}
-              to="/starter-templates"
-              className={styles.viewAllButton}
-            >
-              View all starter templates
-            </Button>
-          </Stack>
-        }
-      />
-    )
-  }
+	if (canCreateTemplates) {
+		return (
+			<TableEmpty
+				message="Create your first template"
+				description={
+					<>
+						Templates are written in Terraform and describe the infrastructure
+						for workspaces. You can start using a starter template below or{" "}
+						<Link
+							href={docs("/admin/templates/creating-templates")}
+							target="_blank"
+							rel="noreferrer"
+						>
+							create your own
+						</Link>
+						.
+					</>
+				}
+				cta={
+					<Stack alignItems="center" spacing={4}>
+						<div css={styles.featuredExamples}>
+							{featuredExamples.map((example) => (
+								<TemplateExampleCard example={example} key={example.id} />
+							))}
+						</div>
 
-  return (
-    <TableEmpty
-      className={styles.withImage}
-      message={t("empty.message")}
-      description={t("empty.descriptionWithoutPermissions")}
-      cta={<CodeExample code="coder templates init" />}
-      image={
-        <div className={styles.emptyImage}>
-          <img src="/featured/templates.webp" alt="" />
-        </div>
-      }
-    />
-  )
-}
+						<Button
+							size="small"
+							component={RouterLink}
+							to="/starter-templates"
+							css={{ borderRadius: 9999 }}
+						>
+							View all starter templates
+						</Button>
+					</Stack>
+				}
+			/>
+		);
+	}
 
-const useStyles = makeStyles((theme) => ({
-  withImage: {
-    paddingBottom: 0,
-  },
+	return (
+		<TableEmpty
+			css={styles.withImage}
+			message="Create a Template"
+			description="Contact your Coder administrator to create a template. You can share the code below."
+			cta={<CodeExample secret={false} code="coder templates init" />}
+			image={
+				<div css={styles.emptyImage}>
+					<img src="/featured/templates.webp" alt="" />
+				</div>
+			}
+		/>
+	);
+};
 
-  emptyImage: {
-    maxWidth: "50%",
-    height: theme.spacing(40),
-    overflow: "hidden",
-    opacity: 0.85,
+const styles = {
+	withImage: {
+		paddingBottom: 0,
+	},
 
-    "& img": {
-      maxWidth: "100%",
-    },
-  },
+	emptyImage: {
+		maxWidth: "50%",
+		height: 320,
+		overflow: "hidden",
+		opacity: 0.85,
 
-  featuredExamples: {
-    maxWidth: theme.spacing(100),
-    display: "grid",
-    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-    gap: theme.spacing(2),
-    gridAutoRows: "min-content",
-  },
+		"& img": {
+			maxWidth: "100%",
+		},
+	},
 
-  template: {
-    backgroundColor: theme.palette.background.paperLight,
-
-    "&:hover": {
-      backgroundColor: theme.palette.divider,
-    },
-  },
-
-  viewAllButton: {
-    borderRadius: 9999,
-  },
-}))
+	featuredExamples: {
+		display: "flex",
+		flexWrap: "wrap",
+		justifyContent: "center",
+		gap: 16,
+	},
+} satisfies Record<string, Interpolation<Theme>>;

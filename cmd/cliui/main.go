@@ -5,31 +5,82 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/cliui"
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/coder/v2/coderd/database/dbtime"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/pretty"
+	"github.com/coder/serpent"
 )
 
 func main() {
-	root := &clibase.Cmd{
+	var root *serpent.Command
+	root = &serpent.Command{
 		Use:   "cliui",
 		Short: "Used for visually testing UI components for the CLI.",
+		HelpHandler: func(inv *serpent.Invocation) error {
+			_, _ = fmt.Fprintln(inv.Stdout, "This command is used for visually testing UI components for the CLI.")
+			_, _ = fmt.Fprintln(inv.Stdout, "It is not intended to be used by end users.")
+			_, _ = fmt.Fprintln(inv.Stdout, "Subcommands: ")
+			for _, child := range root.Children {
+				_, _ = fmt.Fprintf(inv.Stdout, "- %s\n", child.Use)
+			}
+			return nil
+		},
 	}
 
-	root.Children = append(root.Children, &clibase.Cmd{
+	root.Children = append(root.Children, &serpent.Command{
+		Use:    "colors",
+		Hidden: true,
+		Handler: func(inv *serpent.Invocation) error {
+			pretty.Fprintf(inv.Stdout, cliui.DefaultStyles.Code, "This is a code message")
+			_, _ = fmt.Fprintln(inv.Stdout)
+
+			pretty.Fprintf(inv.Stdout, cliui.DefaultStyles.DateTimeStamp, "This is a datetimestamp message")
+			_, _ = fmt.Fprintln(inv.Stdout)
+
+			pretty.Fprintf(inv.Stdout, cliui.DefaultStyles.Error, "This is an error message")
+			_, _ = fmt.Fprintln(inv.Stdout)
+
+			pretty.Fprintf(inv.Stdout, cliui.DefaultStyles.Field, "This is a field message")
+			_, _ = fmt.Fprintln(inv.Stdout)
+
+			pretty.Fprintf(inv.Stdout, cliui.DefaultStyles.Keyword, "This is a keyword message")
+			_, _ = fmt.Fprintln(inv.Stdout)
+
+			pretty.Fprintf(inv.Stdout, cliui.DefaultStyles.Placeholder, "This is a placeholder message")
+			_, _ = fmt.Fprintln(inv.Stdout)
+
+			pretty.Fprintf(inv.Stdout, cliui.DefaultStyles.Prompt, "This is a prompt message")
+			_, _ = fmt.Fprintln(inv.Stdout)
+
+			pretty.Fprintf(inv.Stdout, cliui.DefaultStyles.FocusedPrompt, "This is a focused prompt message")
+			_, _ = fmt.Fprintln(inv.Stdout)
+
+			pretty.Fprintf(inv.Stdout, cliui.DefaultStyles.Fuchsia, "This is a fuchsia message")
+			_, _ = fmt.Fprintln(inv.Stdout)
+
+			pretty.Fprintf(inv.Stdout, cliui.DefaultStyles.Warn, "This is a warning message")
+			_, _ = fmt.Fprintln(inv.Stdout)
+
+			return nil
+		},
+	})
+
+	root.Children = append(root.Children, &serpent.Command{
 		Use: "prompt",
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			_, err := cliui.Prompt(inv, cliui.PromptOptions{
-				Text:    "What is our " + cliui.Styles.Field.Render("company name") + "?",
+				Text:    "What is our " + cliui.Field("company name") + "?",
 				Default: "acme-corp",
 				Validate: func(s string) error {
 					if !strings.EqualFold(s, "coder") {
@@ -38,7 +89,7 @@ func main() {
 					return nil
 				},
 			})
-			if errors.Is(err, cliui.Canceled) {
+			if errors.Is(err, cliui.ErrCanceled) {
 				return nil
 			}
 			if err != nil {
@@ -49,7 +100,7 @@ func main() {
 				Default:   cliui.ConfirmYes,
 				IsConfirm: true,
 			})
-			if errors.Is(err, cliui.Canceled) {
+			if errors.Is(err, cliui.ErrCanceled) {
 				return nil
 			}
 			if err != nil {
@@ -63,9 +114,9 @@ func main() {
 		},
 	})
 
-	root.Children = append(root.Children, &clibase.Cmd{
+	root.Children = append(root.Children, &serpent.Command{
 		Use: "select",
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			value, err := cliui.Select(inv, cliui.SelectOptions{
 				Options: []string{"Tomato", "Banana", "Onion", "Grape", "Lemon"},
 				Size:    3,
@@ -75,26 +126,26 @@ func main() {
 		},
 	})
 
-	root.Children = append(root.Children, &clibase.Cmd{
+	root.Children = append(root.Children, &serpent.Command{
 		Use: "job",
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			job := codersdk.ProvisionerJob{
 				Status:    codersdk.ProvisionerJobPending,
-				CreatedAt: database.Now(),
+				CreatedAt: dbtime.Now(),
 			}
 			go func() {
 				time.Sleep(time.Second)
 				if job.Status != codersdk.ProvisionerJobPending {
 					return
 				}
-				started := database.Now()
+				started := dbtime.Now()
 				job.StartedAt = &started
 				job.Status = codersdk.ProvisionerJobRunning
 				time.Sleep(3 * time.Second)
 				if job.Status != codersdk.ProvisionerJobRunning {
 					return
 				}
-				completed := database.Now()
+				completed := dbtime.Now()
 				job.CompletedAt = &completed
 				job.Status = codersdk.ProvisionerJobSucceeded
 			}()
@@ -152,7 +203,7 @@ func main() {
 					job.Status = codersdk.ProvisionerJobCanceling
 					time.Sleep(time.Second)
 					job.Status = codersdk.ProvisionerJobCanceled
-					completed := database.Now()
+					completed := dbtime.Now()
 					job.CompletedAt = &completed
 					return nil
 				},
@@ -161,36 +212,102 @@ func main() {
 		},
 	})
 
-	root.Children = append(root.Children, &clibase.Cmd{
+	root.Children = append(root.Children, &serpent.Command{
 		Use: "agent",
-		Handler: func(inv *clibase.Invocation) error {
-			agent := codersdk.WorkspaceAgent{
-				Status:         codersdk.WorkspaceAgentDisconnected,
-				LifecycleState: codersdk.WorkspaceAgentLifecycleReady,
+		Handler: func(inv *serpent.Invocation) error {
+			var agent codersdk.WorkspaceAgent
+			var logs []codersdk.WorkspaceAgentLog
+
+			fetchSteps := []func(){
+				func() {
+					createdAt := time.Now().Add(-time.Minute)
+					agent = codersdk.WorkspaceAgent{
+						CreatedAt:      createdAt,
+						Status:         codersdk.WorkspaceAgentConnecting,
+						LifecycleState: codersdk.WorkspaceAgentLifecycleCreated,
+					}
+				},
+				func() {
+					time.Sleep(time.Second)
+					agent.Status = codersdk.WorkspaceAgentTimeout
+				},
+				func() {
+					agent.LifecycleState = codersdk.WorkspaceAgentLifecycleStarting
+					startingAt := time.Now()
+					agent.StartedAt = &startingAt
+					for i := 0; i < 10; i++ {
+						level := codersdk.LogLevelInfo
+						if rand.Float64() > 0.75 { //nolint:gosec
+							level = codersdk.LogLevelError
+						}
+						logs = append(logs, codersdk.WorkspaceAgentLog{
+							CreatedAt: time.Now().Add(-time.Duration(10-i) * 144 * time.Millisecond),
+							Output:    fmt.Sprintf("Some log %d", i),
+							Level:     level,
+						})
+					}
+				},
+				func() {
+					time.Sleep(time.Second)
+					firstConnectedAt := time.Now()
+					agent.FirstConnectedAt = &firstConnectedAt
+					lastConnectedAt := firstConnectedAt.Add(0)
+					agent.LastConnectedAt = &lastConnectedAt
+					agent.Status = codersdk.WorkspaceAgentConnected
+				},
+				func() {},
+				func() {
+					time.Sleep(5 * time.Second)
+					agent.Status = codersdk.WorkspaceAgentConnected
+					lastConnectedAt := time.Now()
+					agent.LastConnectedAt = &lastConnectedAt
+				},
 			}
-			go func() {
-				time.Sleep(3 * time.Second)
-				agent.Status = codersdk.WorkspaceAgentConnected
-			}()
-			err := cliui.Agent(inv.Context(), inv.Stdout, cliui.AgentOptions{
-				WorkspaceName: "dev",
-				Fetch: func(ctx context.Context) (codersdk.WorkspaceAgent, error) {
+			err := cliui.Agent(inv.Context(), inv.Stdout, uuid.Nil, cliui.AgentOptions{
+				FetchInterval: 100 * time.Millisecond,
+				Wait:          true,
+				Fetch: func(_ context.Context, _ uuid.UUID) (codersdk.WorkspaceAgent, error) {
+					if len(fetchSteps) == 0 {
+						return agent, nil
+					}
+					step := fetchSteps[0]
+					fetchSteps = fetchSteps[1:]
+					step()
 					return agent, nil
 				},
-				WarnInterval: 2 * time.Second,
+				FetchLogs: func(_ context.Context, _ uuid.UUID, _ int64, follow bool) (<-chan []codersdk.WorkspaceAgentLog, io.Closer, error) {
+					logsC := make(chan []codersdk.WorkspaceAgentLog, len(logs))
+					if follow {
+						go func() {
+							defer close(logsC)
+							for _, log := range logs {
+								logsC <- []codersdk.WorkspaceAgentLog{log}
+								time.Sleep(144 * time.Millisecond)
+							}
+							agent.LifecycleState = codersdk.WorkspaceAgentLifecycleReady
+							readyAt := dbtime.Now()
+							agent.ReadyAt = &readyAt
+						}()
+					} else {
+						logsC <- logs
+						close(logsC)
+					}
+					return logsC, closeFunc(func() error {
+						return nil
+					}), nil
+				},
 			})
 			if err != nil {
 				return err
 			}
-			_, _ = fmt.Printf("Completed!\n")
 			return nil
 		},
 	})
 
-	root.Children = append(root.Children, &clibase.Cmd{
+	root.Children = append(root.Children, &serpent.Command{
 		Use: "resources",
-		Handler: func(inv *clibase.Invocation) error {
-			disconnected := database.Now().Add(-4 * time.Second)
+		Handler: func(inv *serpent.Invocation) error {
+			disconnected := dbtime.Now().Add(-4 * time.Second)
 			return cliui.WorkspaceResources(inv.Stdout, []codersdk.WorkspaceResource{{
 				Transition: codersdk.WorkspaceTransitionStart,
 				Type:       "google_compute_disk",
@@ -204,7 +321,7 @@ func main() {
 				Type:       "google_compute_instance",
 				Name:       "dev",
 				Agents: []codersdk.WorkspaceAgent{{
-					CreatedAt:       database.Now().Add(-10 * time.Second),
+					CreatedAt:       dbtime.Now().Add(-10 * time.Second),
 					Status:          codersdk.WorkspaceAgentConnecting,
 					LifecycleState:  codersdk.WorkspaceAgentLifecycleCreated,
 					Name:            "dev",
@@ -237,9 +354,9 @@ func main() {
 		},
 	})
 
-	root.Children = append(root.Children, &clibase.Cmd{
+	root.Children = append(root.Children, &serpent.Command{
 		Use: "git-auth",
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			var count atomic.Int32
 			var githubAuthed atomic.Bool
 			var gitlabAuthed atomic.Bool
@@ -253,17 +370,17 @@ func main() {
 				// Complete the auth!
 				gitlabAuthed.Store(true)
 			}()
-			return cliui.GitAuth(inv.Context(), inv.Stdout, cliui.GitAuthOptions{
-				Fetch: func(ctx context.Context) ([]codersdk.TemplateVersionGitAuth, error) {
+			return cliui.ExternalAuth(inv.Context(), inv.Stdout, cliui.ExternalAuthOptions{
+				Fetch: func(_ context.Context) ([]codersdk.TemplateVersionExternalAuth, error) {
 					count.Add(1)
-					return []codersdk.TemplateVersionGitAuth{{
+					return []codersdk.TemplateVersionExternalAuth{{
 						ID:              "github",
-						Type:            codersdk.GitProviderGitHub,
+						Type:            codersdk.EnhancedExternalAuthProviderGitHub.String(),
 						Authenticated:   githubAuthed.Load(),
 						AuthenticateURL: "https://example.com/gitauth/github?redirect=" + url.QueryEscape("/gitauth?notify"),
 					}, {
 						ID:              "gitlab",
-						Type:            codersdk.GitProviderGitLab,
+						Type:            codersdk.EnhancedExternalAuthProviderGitLab.String(),
 						Authenticated:   gitlabAuthed.Load(),
 						AuthenticateURL: "https://example.com/gitauth/gitlab?redirect=" + url.QueryEscape("/gitauth?notify"),
 					}}, nil
@@ -272,9 +389,15 @@ func main() {
 		},
 	})
 
-	err := root.Invoke(os.Args[1:]...).Run()
+	err := root.Invoke(os.Args[1:]...).WithOS().Run()
 	if err != nil {
 		_, _ = fmt.Println(err.Error())
 		os.Exit(1)
 	}
+}
+
+type closeFunc func() error
+
+func (f closeFunc) Close() error {
+	return f()
 }

@@ -2,25 +2,29 @@ package tailnet
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
+	"html/template"
 	"io"
-	"net"
 	"net/http"
 	"net/netip"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"cdr.dev/slog"
-
 	"github.com/google/uuid"
-	lru "github.com/hashicorp/golang-lru/v2"
-	"golang.org/x/exp/slices"
 	"golang.org/x/xerrors"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
+
+	"cdr.dev/slog"
+	"github.com/coder/coder/v2/tailnet/proto"
+)
+
+const (
+	// ResponseBufferSize is the max number of responses to buffer per connection before we start
+	// dropping updates
+	ResponseBufferSize = 512
+	// RequestBufferSize is the max number of requests to buffer per connection
+	RequestBufferSize = 32
 )
 
 // Coordinator exchanges nodes with agents to establish connections.
@@ -29,20 +33,18 @@ import (
 // └──────────────────┘   └────────────────────┘   └───────────────────┘   └──────────────────┘
 // Coordinators have different guarantees for HA support.
 type Coordinator interface {
+	CoordinatorV2
+}
+
+// CoordinatorV2 is the interface for interacting with the coordinator via the 2.0 tailnet API.
+type CoordinatorV2 interface {
 	// ServeHTTPDebug serves a debug webpage that shows the internal state of
 	// the coordinator.
 	ServeHTTPDebug(w http.ResponseWriter, r *http.Request)
-	// Node returns an in-memory node by ID.
+	// Node returns a node by peer ID, if known to the coordinator.  Returns nil if unknown.
 	Node(id uuid.UUID) *Node
-	// ServeClient accepts a WebSocket connection that wants to connect to an agent
-	// with the specified ID.
-	ServeClient(conn net.Conn, id uuid.UUID, agent uuid.UUID) error
-	// ServeAgent accepts a WebSocket connection to an agent that listens to
-	// incoming connections and publishes node updates.
-	// Name is just used for debug information. It can be left blank.
-	ServeAgent(conn net.Conn, id uuid.UUID, name string) error
-	// Close closes the coordinator.
 	Close() error
+	Coordinate(ctx context.Context, id uuid.UUID, name string, a CoordinateeAuth) (chan<- *proto.CoordinateRequest, <-chan *proto.CoordinateResponse)
 }
 
 // Node represents a node in the network.
@@ -53,10 +55,11 @@ type Node struct {
 	AsOf time.Time `json:"as_of"`
 	// Key is the Wireguard public key of the node.
 	Key key.NodePublic `json:"key"`
-	// DiscoKey is used for discovery messages over DERP to establish peer-to-peer connections.
+	// DiscoKey is used for discovery messages over DERP to establish
+	// peer-to-peer connections.
 	DiscoKey key.DiscoPublic `json:"disco"`
-	// PreferredDERP is the DERP server that peered connections
-	// should meet at to establish.
+	// PreferredDERP is the DERP server that peered connections should meet at
+	// to establish.
 	PreferredDERP int `json:"preferred_derp"`
 	// DERPLatency is the latency in seconds to each DERP server.
 	DERPLatency map[string]float64 `json:"derp_latency"`
@@ -67,60 +70,40 @@ type Node struct {
 	DERPForcedWebsocket map[int]string `json:"derp_forced_websockets"`
 	// Addresses are the IP address ranges this connection exposes.
 	Addresses []netip.Prefix `json:"addresses"`
-	// AllowedIPs specify what addresses can dial the connection.
-	// We allow all by default.
+	// AllowedIPs specify what addresses can dial the connection. We allow all
+	// by default.
 	AllowedIPs []netip.Prefix `json:"allowed_ips"`
 	// Endpoints are ip:port combinations that can be used to establish
 	// peer-to-peer connections.
 	Endpoints []string `json:"endpoints"`
 }
 
-// ServeCoordinator matches the RW structure of a coordinator to exchange node messages.
-func ServeCoordinator(conn net.Conn, updateNodes func(node []*Node) error) (func(node *Node), <-chan error) {
-	errChan := make(chan error, 1)
-	sendErr := func(err error) {
-		select {
-		case errChan <- err:
-		default:
-		}
-	}
-	go func() {
-		decoder := json.NewDecoder(conn)
-		for {
-			var nodes []*Node
-			err := decoder.Decode(&nodes)
-			if err != nil {
-				sendErr(xerrors.Errorf("read: %w", err))
-				return
-			}
-			err = updateNodes(nodes)
-			if err != nil {
-				sendErr(xerrors.Errorf("update nodes: %w", err))
-			}
-		}
-	}()
-
-	return func(node *Node) {
-		data, err := json.Marshal(node)
-		if err != nil {
-			sendErr(xerrors.Errorf("marshal node: %w", err))
-			return
-		}
-		_, err = conn.Write(data)
-		if err != nil {
-			sendErr(xerrors.Errorf("write: %w", err))
-		}
-	}, errChan
+// Coordinatee is something that can be coordinated over the Coordinate protocol.  Usually this is a
+// Conn.
+type Coordinatee interface {
+	UpdatePeers([]*proto.CoordinateResponse_PeerUpdate) error
+	SetAllPeersLost()
+	SetNodeCallback(func(*Node))
+	// SetTunnelDestination indicates to tailnet that the peer id is a
+	// destination.
+	SetTunnelDestination(id uuid.UUID)
 }
 
 const LoggerName = "coord"
+
+var (
+	ErrClosed         = xerrors.New("coordinator is closed")
+	ErrWouldBlock     = xerrors.New("would block")
+	ErrAlreadyRemoved = xerrors.New("already removed")
+)
 
 // NewCoordinator constructs a new in-memory connection coordinator. This
 // coordinator is incompatible with multiple Coder replicas as all node data is
 // in-memory.
 func NewCoordinator(logger slog.Logger) Coordinator {
 	return &coordinator{
-		core: newCore(logger),
+		core:       newCore(logger.Named(LoggerName)),
+		closedChan: make(chan struct{}),
 	}
 }
 
@@ -129,153 +112,84 @@ func NewCoordinator(logger slog.Logger) Coordinator {
 // ┌──────────────────┐   ┌────────────────────┐   ┌───────────────────┐   ┌──────────────────┐
 // │tailnet.Coordinate├──►│tailnet.AcceptClient│◄─►│tailnet.AcceptAgent│◄──┤tailnet.Coordinate│
 // └──────────────────┘   └────────────────────┘   └───────────────────┘   └──────────────────┘
-// This coordinator is incompatible with multiple Coder
-// replicas as all node data is in-memory.
+// This coordinator is incompatible with multiple Coder replicas as all node
+// data is in-memory.
 type coordinator struct {
 	core *core
+
+	mu         sync.Mutex
+	closed     bool
+	wg         sync.WaitGroup
+	closedChan chan struct{}
 }
 
-// core is an in-memory structure of Node and TrackedConn mappings.  Its methods may be called from multiple goroutines;
+func (c *coordinator) Coordinate(
+	ctx context.Context, id uuid.UUID, name string, a CoordinateeAuth,
+) (
+	chan<- *proto.CoordinateRequest, <-chan *proto.CoordinateResponse,
+) {
+	logger := c.core.logger.With(
+		slog.F("peer_id", id),
+		slog.F("peer_name", name),
+	)
+	reqs := make(chan *proto.CoordinateRequest, RequestBufferSize)
+	resps := make(chan *proto.CoordinateResponse, ResponseBufferSize)
+
+	p := &peer{
+		logger: logger,
+		id:     id,
+		name:   name,
+		resps:  resps,
+		reqs:   reqs,
+		auth:   a,
+		sent:   make(map[uuid.UUID]*proto.Node),
+	}
+	err := c.core.initPeer(p)
+	if err != nil {
+		if xerrors.Is(err, ErrClosed) {
+			logger.Debug(ctx, "coordinate failed: Coordinator is closed")
+		} else {
+			logger.Critical(ctx, "coordinate failed: %s", err.Error())
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		// don't start the readLoop if we are closed.
+		return reqs, resps
+	}
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		p.reqLoop(ctx, logger, c.core.handleRequest)
+		err := c.core.lostPeer(p)
+		if xerrors.Is(err, ErrClosed) || xerrors.Is(err, ErrAlreadyRemoved) {
+			return
+		}
+		if err != nil {
+			logger.Error(context.Background(), "failed to process lost peer", slog.Error(err))
+		}
+	}()
+	return reqs, resps
+}
+
+// core is an in-memory structure of peer mappings.  Its methods may be called from multiple goroutines;
 // it is protected by a mutex to ensure data stay consistent.
 type core struct {
 	logger slog.Logger
 	mutex  sync.RWMutex
 	closed bool
 
-	// nodes maps agent and connection IDs their respective node.
-	nodes map[uuid.UUID]*Node
-	// agentSockets maps agent IDs to their open websocket.
-	agentSockets map[uuid.UUID]*TrackedConn
-	// agentToConnectionSockets maps agent IDs to connection IDs of conns that
-	// are subscribed to updates for that agent.
-	agentToConnectionSockets map[uuid.UUID]map[uuid.UUID]*TrackedConn
-
-	// agentNameCache holds a cache of agent names. If one of them disappears,
-	// it's helpful to have a name cached for debugging.
-	agentNameCache *lru.Cache[uuid.UUID, string]
+	peers   map[uuid.UUID]*peer
+	tunnels *tunnelStore
 }
 
 func newCore(logger slog.Logger) *core {
-	nameCache, err := lru.New[uuid.UUID, string](512)
-	if err != nil {
-		panic("make lru cache: " + err.Error())
-	}
-
 	return &core{
-		logger:                   logger,
-		closed:                   false,
-		nodes:                    make(map[uuid.UUID]*Node),
-		agentSockets:             map[uuid.UUID]*TrackedConn{},
-		agentToConnectionSockets: map[uuid.UUID]map[uuid.UUID]*TrackedConn{},
-		agentNameCache:           nameCache,
-	}
-}
-
-var ErrWouldBlock = xerrors.New("would block")
-
-type TrackedConn struct {
-	ctx     context.Context
-	cancel  func()
-	conn    net.Conn
-	updates chan []*Node
-	logger  slog.Logger
-
-	// ID is an ephemeral UUID used to uniquely identify the owner of the
-	// connection.
-	ID uuid.UUID
-
-	Name       string
-	Start      int64
-	LastWrite  int64
-	Overwrites int64
-}
-
-func (t *TrackedConn) Enqueue(n []*Node) (err error) {
-	atomic.StoreInt64(&t.LastWrite, time.Now().Unix())
-	select {
-	case t.updates <- n:
-		return nil
-	default:
-		return ErrWouldBlock
-	}
-}
-
-// Close the connection and cancel the context for reading node updates from the queue
-func (t *TrackedConn) Close() error {
-	t.cancel()
-	return t.conn.Close()
-}
-
-// WriteTimeout is the amount of time we wait to write a node update to a connection before we declare it hung.
-// It is exported so that tests can use it.
-const WriteTimeout = time.Second * 5
-
-// SendUpdates reads node updates and writes them to the connection.  Ends when writes hit an error or context is
-// canceled.
-func (t *TrackedConn) SendUpdates() {
-	for {
-		select {
-		case <-t.ctx.Done():
-			t.logger.Debug(t.ctx, "done sending updates")
-			return
-		case nodes := <-t.updates:
-			data, err := json.Marshal(nodes)
-			if err != nil {
-				t.logger.Error(t.ctx, "unable to marshal nodes update", slog.Error(err), slog.F("nodes", nodes))
-				return
-			}
-
-			// Set a deadline so that hung connections don't put back pressure on the system.
-			// Node updates are tiny, so even the dinkiest connection can handle them if it's not hung.
-			err = t.conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
-			if err != nil {
-				// often, this is just because the connection is closed/broken, so only log at debug.
-				t.logger.Debug(t.ctx, "unable to set write deadline", slog.Error(err))
-				_ = t.Close()
-				return
-			}
-			_, err = t.conn.Write(data)
-			if err != nil {
-				// often, this is just because the connection is closed/broken, so only log at debug.
-				t.logger.Debug(t.ctx, "could not write nodes to connection", slog.Error(err), slog.F("nodes", nodes))
-				_ = t.Close()
-				return
-			}
-			t.logger.Debug(t.ctx, "wrote nodes", slog.F("nodes", nodes))
-
-			// nhooyr.io/websocket has a bugged implementation of deadlines on a websocket net.Conn.  What they are
-			// *supposed* to do is set a deadline for any subsequent writes to complete, otherwise the call to Write()
-			// fails.  What nhooyr.io/websocket does is set a timer, after which it expires the websocket write context.
-			// If this timer fires, then the next write will fail *even if we set a new write deadline*.  So, after
-			// our successful write, it is important that we reset the deadline before it fires.
-			err = t.conn.SetWriteDeadline(time.Time{})
-			if err != nil {
-				// often, this is just because the connection is closed/broken, so only log at debug.
-				t.logger.Debug(t.ctx, "unable to extend write deadline", slog.Error(err))
-				_ = t.Close()
-				return
-			}
-		}
-	}
-}
-
-func NewTrackedConn(ctx context.Context, cancel func(), conn net.Conn, id uuid.UUID, logger slog.Logger, overwrites int64) *TrackedConn {
-	// buffer updates so they don't block, since we hold the
-	// coordinator mutex while queuing.  Node updates don't
-	// come quickly, so 512 should be plenty for all but
-	// the most pathological cases.
-	updates := make(chan []*Node, 512)
-	now := time.Now().Unix()
-	return &TrackedConn{
-		ctx:        ctx,
-		conn:       conn,
-		cancel:     cancel,
-		updates:    updates,
-		logger:     logger,
-		ID:         id,
-		Start:      now,
-		LastWrite:  now,
-		Overwrites: overwrites,
+		logger:  logger,
+		closed:  false,
+		peers:   make(map[uuid.UUID]*peer),
+		tunnels: newTunnelStore(),
 	}
 }
 
@@ -288,340 +202,293 @@ func (c *coordinator) Node(id uuid.UUID) *Node {
 func (c *core) node(id uuid.UUID) *Node {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	return c.nodes[id]
-}
-
-func (c *coordinator) NodeCount() int {
-	return c.core.nodeCount()
-}
-
-func (c *core) nodeCount() int {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	return len(c.nodes)
-}
-
-func (c *coordinator) AgentCount() int {
-	return c.core.agentCount()
-}
-
-func (c *core) agentCount() int {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	return len(c.agentSockets)
-}
-
-// ServeClient accepts a WebSocket connection that wants to connect to an agent
-// with the specified ID.
-func (c *coordinator) ServeClient(conn net.Conn, id uuid.UUID, agent uuid.UUID) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	logger := c.core.clientLogger(id, agent)
-	logger.Debug(ctx, "coordinating client")
-	tc, err := c.core.initAndTrackClient(ctx, cancel, conn, id, agent)
+	p := c.peers[id]
+	if p == nil || p.node == nil {
+		return nil
+	}
+	v1Node, err := ProtoToNode(p.node)
 	if err != nil {
-		return err
+		c.logger.Critical(context.Background(),
+			"failed to convert node", slog.Error(err), slog.F("node", p.node))
+		return nil
 	}
-	defer c.core.clientDisconnected(id, agent)
-
-	// On this goroutine, we read updates from the client and publish them.  We start a second goroutine
-	// to write updates back to the client.
-	go tc.SendUpdates()
-
-	decoder := json.NewDecoder(conn)
-	for {
-		err := c.handleNextClientMessage(id, agent, decoder)
-		if err != nil {
-			logger.Debug(ctx, "unable to read client update; closed conn?", slog.Error(err))
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, context.Canceled) {
-				return nil
-			}
-			return xerrors.Errorf("handle next client message: %w", err)
-		}
-	}
+	return v1Node
 }
 
-func (c *core) clientLogger(id, agent uuid.UUID) slog.Logger {
-	return c.logger.With(slog.F("client_id", id), slog.F("agent_id", agent))
-}
-
-// initAndTrackClient creates a TrackedConn for the client, and sends any initial Node updates if we have any.  It is
-// one function that does two things because it is critical that we hold the mutex for both things, lest we miss some
-// updates.
-func (c *core) initAndTrackClient(
-	ctx context.Context, cancel func(), conn net.Conn, id, agent uuid.UUID,
-) (
-	*TrackedConn, error,
-) {
-	logger := c.clientLogger(id, agent)
+func (c *core) handleRequest(ctx context.Context, p *peer, req *proto.CoordinateRequest) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	if c.closed {
-		return nil, xerrors.New("coordinator is closed")
+		return ErrClosed
 	}
-	tc := NewTrackedConn(ctx, cancel, conn, id, logger, 0)
+	pr, ok := c.peers[p.id]
+	if !ok || pr != p {
+		return ErrAlreadyRemoved
+	}
 
-	// When a new connection is requested, we update it with the latest
-	// node of the agent. This allows the connection to establish.
-	node, ok := c.nodes[agent]
-	if ok {
-		err := tc.Enqueue([]*Node{node})
-		// this should never error since we're still the only goroutine that
-		// knows about the TrackedConn.  If we hit an error something really
-		// wrong is happening
+	if err := pr.auth.Authorize(ctx, req); err != nil {
+		return xerrors.Errorf("authorize request: %w", err)
+	}
+
+	if req.UpdateSelf != nil {
+		err := c.nodeUpdateLocked(p, req.UpdateSelf.Node)
+		if xerrors.Is(err, ErrAlreadyRemoved) || xerrors.Is(err, ErrClosed) {
+			return nil
+		}
 		if err != nil {
-			logger.Critical(ctx, "unable to queue initial node", slog.Error(err))
-			return nil, err
+			return xerrors.Errorf("node update failed: %w", err)
 		}
 	}
-
-	// Insert this connection into a map so the agent
-	// can publish node updates.
-	connectionSockets, ok := c.agentToConnectionSockets[agent]
-	if !ok {
-		connectionSockets = map[uuid.UUID]*TrackedConn{}
-		c.agentToConnectionSockets[agent] = connectionSockets
+	if req.AddTunnel != nil {
+		dstID, err := uuid.FromBytes(req.AddTunnel.Id)
+		if err != nil {
+			// this shouldn't happen unless there is a client error.  Close the connection so the client
+			// doesn't just happily continue thinking everything is fine.
+			return xerrors.Errorf("unable to convert bytes to UUID: %w", err)
+		}
+		err = c.addTunnelLocked(p, dstID)
+		if xerrors.Is(err, ErrAlreadyRemoved) || xerrors.Is(err, ErrClosed) {
+			return nil
+		}
+		if err != nil {
+			return xerrors.Errorf("add tunnel failed: %w", err)
+		}
 	}
-	connectionSockets[id] = tc
-	logger.Debug(ctx, "added tracked connection")
-	return tc, nil
-}
-
-func (c *core) clientDisconnected(id, agent uuid.UUID) {
-	logger := c.clientLogger(id, agent)
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	// Clean all traces of this connection from the map.
-	delete(c.nodes, id)
-	logger.Debug(context.Background(), "deleted client node")
-	connectionSockets, ok := c.agentToConnectionSockets[agent]
-	if !ok {
-		return
+	if req.RemoveTunnel != nil {
+		dstID, err := uuid.FromBytes(req.RemoveTunnel.Id)
+		if err != nil {
+			// this shouldn't happen unless there is a client error.  Close the connection so the client
+			// doesn't just happily continue thinking everything is fine.
+			return xerrors.Errorf("unable to convert bytes to UUID: %w", err)
+		}
+		err = c.removeTunnelLocked(p, dstID)
+		if xerrors.Is(err, ErrAlreadyRemoved) || xerrors.Is(err, ErrClosed) {
+			return nil
+		}
+		if err != nil {
+			return xerrors.Errorf("remove tunnel failed: %w", err)
+		}
 	}
-	delete(connectionSockets, id)
-	logger.Debug(context.Background(), "deleted client connectionSocket from map")
-	if len(connectionSockets) != 0 {
-		return
+	if req.Disconnect != nil {
+		c.removePeerLocked(p.id, proto.CoordinateResponse_PeerUpdate_DISCONNECTED, "graceful disconnect")
 	}
-	delete(c.agentToConnectionSockets, agent)
-	logger.Debug(context.Background(), "deleted last client connectionSocket from map")
-}
-
-func (c *coordinator) handleNextClientMessage(id, agent uuid.UUID, decoder *json.Decoder) error {
-	logger := c.core.clientLogger(id, agent)
-	var node Node
-	err := decoder.Decode(&node)
-	if err != nil {
-		return xerrors.Errorf("read json: %w", err)
+	if rfhs := req.ReadyForHandshake; rfhs != nil {
+		err := c.handleReadyForHandshakeLocked(pr, rfhs)
+		if err != nil {
+			return xerrors.Errorf("handle ack: %w", err)
+		}
 	}
-	logger.Debug(context.Background(), "got client node update", slog.F("node", node))
-	return c.core.clientNodeUpdate(id, agent, &node)
-}
-
-func (c *core) clientNodeUpdate(id, agent uuid.UUID, node *Node) error {
-	logger := c.clientLogger(id, agent)
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	// Update the node of this client in our in-memory map. If an agent entirely
-	// shuts down and reconnects, it needs to be aware of all clients attempting
-	// to establish connections.
-	c.nodes[id] = node
-
-	agentSocket, ok := c.agentSockets[agent]
-	if !ok {
-		logger.Debug(context.Background(), "no agent socket, unable to send node")
-		return nil
-	}
-
-	err := agentSocket.Enqueue([]*Node{node})
-	if err != nil {
-		return xerrors.Errorf("Enqueue node: %w", err)
-	}
-	logger.Debug(context.Background(), "enqueued node to agent")
 	return nil
 }
 
-func (c *core) agentLogger(id uuid.UUID) slog.Logger {
-	return c.logger.With(slog.F("agent_id", id))
+func (c *core) handleReadyForHandshakeLocked(src *peer, rfhs []*proto.CoordinateRequest_ReadyForHandshake) error {
+	for _, rfh := range rfhs {
+		dstID, err := uuid.FromBytes(rfh.Id)
+		if err != nil {
+			// this shouldn't happen unless there is a client error.  Close the connection so the client
+			// doesn't just happily continue thinking everything is fine.
+			return xerrors.Errorf("unable to convert bytes to UUID: %w", err)
+		}
+
+		if !c.tunnels.tunnelExists(src.id, dstID) {
+			// We intentionally do not return an error here, since it's
+			// inherently racy. It's possible for a source to connect, then
+			// subsequently disconnect before the agent has sent back the RFH.
+			// Since this could potentially happen to a non-malicious agent, we
+			// don't want to kill its connection.
+			select {
+			case src.resps <- &proto.CoordinateResponse{
+				Error: fmt.Sprintf("you do not share a tunnel with %q", dstID.String()),
+			}:
+			default:
+				return ErrWouldBlock
+			}
+			continue
+		}
+
+		dst, ok := c.peers[dstID]
+		if ok {
+			select {
+			case dst.resps <- &proto.CoordinateResponse{
+				PeerUpdates: []*proto.CoordinateResponse_PeerUpdate{{
+					Id:   src.id[:],
+					Kind: proto.CoordinateResponse_PeerUpdate_READY_FOR_HANDSHAKE,
+				}},
+			}:
+			default:
+				return ErrWouldBlock
+			}
+		}
+	}
+	return nil
 }
 
-// ServeAgent accepts a WebSocket connection to an agent that
-// listens to incoming connections and publishes node updates.
-func (c *coordinator) ServeAgent(conn net.Conn, id uuid.UUID, name string) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	logger := c.core.agentLogger(id)
-	logger.Debug(context.Background(), "coordinating agent")
-	// This uniquely identifies a connection that belongs to this goroutine.
-	unique := uuid.New()
-	tc, err := c.core.initAndTrackAgent(ctx, cancel, conn, id, unique, name)
+func (c *core) nodeUpdateLocked(p *peer, node *proto.Node) (err error) {
+	c.logger.Debug(context.Background(), "processing node update",
+		slog.F("peer_id", p.id),
+		slog.F("node", node.String()))
+
+	p.node = node
+	c.updateTunnelPeersLocked(p.id, node, proto.CoordinateResponse_PeerUpdate_NODE, "node update")
+	return nil
+}
+
+func (c *core) updateTunnelPeersLocked(id uuid.UUID, n *proto.Node, k proto.CoordinateResponse_PeerUpdate_Kind, reason string) {
+	tp := c.tunnels.findTunnelPeers(id)
+	c.logger.Debug(context.Background(), "got tunnel peers", slog.F("peer_id", id), slog.F("tunnel_peers", tp))
+	for _, otherID := range tp {
+		other, ok := c.peers[otherID]
+		if !ok {
+			continue
+		}
+		err := other.updateMappingLocked(id, n, k, reason)
+		if err != nil {
+			other.logger.Error(context.Background(), "failed to update mapping", slog.Error(err))
+			c.removePeerLocked(other.id, proto.CoordinateResponse_PeerUpdate_DISCONNECTED, "failed update")
+		}
+	}
+}
+
+func (c *core) addTunnelLocked(src *peer, dstID uuid.UUID) error {
+	c.tunnels.add(src.id, dstID)
+	c.logger.Debug(context.Background(), "adding tunnel",
+		slog.F("src_id", src.id),
+		slog.F("dst_id", dstID))
+	dst, ok := c.peers[dstID]
+	if ok {
+		if dst.node != nil {
+			err := src.updateMappingLocked(dstID, dst.node, proto.CoordinateResponse_PeerUpdate_NODE, "add tunnel")
+			if err != nil {
+				src.logger.Error(context.Background(), "failed update of tunnel src", slog.Error(err))
+				c.removePeerLocked(src.id, proto.CoordinateResponse_PeerUpdate_DISCONNECTED, "failed update")
+				// if the source fails, then the tunnel is also removed and there is no reason to continue
+				// processing.
+				return err
+			}
+		}
+		if src.node != nil {
+			err := dst.updateMappingLocked(src.id, src.node, proto.CoordinateResponse_PeerUpdate_NODE, "add tunnel")
+			if err != nil {
+				dst.logger.Error(context.Background(), "failed update of tunnel dst", slog.Error(err))
+				c.removePeerLocked(dst.id, proto.CoordinateResponse_PeerUpdate_DISCONNECTED, "failed update")
+			}
+		}
+	}
+	return nil
+}
+
+func (c *core) removeTunnelLocked(src *peer, dstID uuid.UUID) error {
+	err := src.updateMappingLocked(dstID, nil, proto.CoordinateResponse_PeerUpdate_DISCONNECTED, "remove tunnel")
 	if err != nil {
+		src.logger.Error(context.Background(), "failed to update", slog.Error(err))
+		c.removePeerLocked(src.id, proto.CoordinateResponse_PeerUpdate_DISCONNECTED, "failed update")
+		// removing the peer also removes all other tunnels and notifies destinations, so it's safe to
+		// return here.
 		return err
 	}
-
-	// On this goroutine, we read updates from the agent and publish them.  We start a second goroutine
-	// to write updates back to the agent.
-	go tc.SendUpdates()
-
-	defer c.core.agentDisconnected(id, unique)
-
-	decoder := json.NewDecoder(conn)
-	for {
-		err := c.handleNextAgentMessage(id, decoder)
-		if err != nil {
-			logger.Debug(ctx, "unable to read agent update; closed conn?", slog.Error(err))
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, context.Canceled) {
-				return nil
-			}
-			return xerrors.Errorf("handle next agent message: %w", err)
-		}
-	}
-}
-
-func (c *core) agentDisconnected(id, unique uuid.UUID) {
-	logger := c.agentLogger(id)
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	// Only delete the connection if it's ours. It could have been
-	// overwritten.
-	if idConn, ok := c.agentSockets[id]; ok && idConn.ID == unique {
-		delete(c.agentSockets, id)
-		delete(c.nodes, id)
-		logger.Debug(context.Background(), "deleted agent socket and node")
-	}
-}
-
-// initAndTrackAgent creates a TrackedConn for the agent, and sends any initial nodes updates if we have any.  It is
-// one function that does two things because it is critical that we hold the mutex for both things, lest we miss some
-// updates.
-func (c *core) initAndTrackAgent(ctx context.Context, cancel func(), conn net.Conn, id, unique uuid.UUID, name string) (*TrackedConn, error) {
-	logger := c.logger.With(slog.F("agent_id", id))
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	if c.closed {
-		return nil, xerrors.New("coordinator is closed")
-	}
-
-	overwrites := int64(0)
-	// If an old agent socket is connected, we Close it to avoid any leaks. This
-	// shouldn't ever occur because we expect one agent to be running, but it's
-	// possible for a race condition to happen when an agent is disconnected and
-	// attempts to reconnect before the server realizes the old connection is
-	// dead.
-	oldAgentSocket, ok := c.agentSockets[id]
+	dst, ok := c.peers[dstID]
 	if ok {
-		overwrites = oldAgentSocket.Overwrites + 1
-		_ = oldAgentSocket.Close()
-	}
-	tc := NewTrackedConn(ctx, cancel, conn, unique, logger, overwrites)
-	c.agentNameCache.Add(id, name)
-
-	sockets, ok := c.agentToConnectionSockets[id]
-	if ok {
-		// Publish all nodes that want to connect to the
-		// desired agent ID.
-		nodes := make([]*Node, 0, len(sockets))
-		for targetID := range sockets {
-			node, ok := c.nodes[targetID]
-			if !ok {
-				continue
-			}
-			nodes = append(nodes, node)
-		}
-		err := tc.Enqueue(nodes)
-		// this should never error since we're still the only goroutine that
-		// knows about the TrackedConn.  If we hit an error something really
-		// wrong is happening
+		err = dst.updateMappingLocked(src.id, nil, proto.CoordinateResponse_PeerUpdate_DISCONNECTED, "remove tunnel")
 		if err != nil {
-			logger.Critical(ctx, "unable to queue initial nodes", slog.Error(err))
-			return nil, err
-		}
-		logger.Debug(ctx, "wrote initial client(s) to agent", slog.F("nodes", nodes))
-	}
-
-	c.agentSockets[id] = tc
-	logger.Debug(ctx, "added agent socket")
-	return tc, nil
-}
-
-func (c *coordinator) handleNextAgentMessage(id uuid.UUID, decoder *json.Decoder) error {
-	logger := c.core.agentLogger(id)
-	var node Node
-	err := decoder.Decode(&node)
-	if err != nil {
-		return xerrors.Errorf("read json: %w", err)
-	}
-	logger.Debug(context.Background(), "decoded agent node", slog.F("node", node))
-	return c.core.agentNodeUpdate(id, &node)
-}
-
-func (c *core) agentNodeUpdate(id uuid.UUID, node *Node) error {
-	logger := c.agentLogger(id)
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.nodes[id] = node
-	connectionSockets, ok := c.agentToConnectionSockets[id]
-	if !ok {
-		logger.Debug(context.Background(), "no client sockets; unable to send node")
-		return nil
-	}
-
-	// Publish the new node to every listening socket.
-	for clientID, connectionSocket := range connectionSockets {
-		err := connectionSocket.Enqueue([]*Node{node})
-		if err == nil {
-			logger.Debug(context.Background(), "enqueued agent node to client",
-				slog.F("client_id", clientID))
-		} else {
-			// queue is backed up for some reason.  This is bad, but we don't want to drop
-			// updates to other clients over it.  Log and move on.
-			logger.Error(context.Background(), "failed to Enqueue",
-				slog.F("client_id", clientID), slog.Error(err))
+			dst.logger.Error(context.Background(), "failed to update", slog.Error(err))
+			c.removePeerLocked(dst.id, proto.CoordinateResponse_PeerUpdate_DISCONNECTED, "failed update")
+			// don't return here because we still want to remove the tunnel, and an error at the
+			// destination doesn't count as an error removing the tunnel at the source.
 		}
 	}
+	c.tunnels.remove(src.id, dstID)
 	return nil
+}
+
+func (c *core) initPeer(p *peer) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	p.logger.Debug(context.Background(), "initPeer")
+	if c.closed {
+		return ErrClosed
+	}
+	if p.node != nil {
+		return xerrors.Errorf("peer (%s) must be initialized with nil node", p.id)
+	}
+	if old, ok := c.peers[p.id]; ok {
+		// rare and interesting enough to log at Info, but it isn't an error per se
+		old.logger.Info(context.Background(), "overwritten by new connection")
+		close(old.resps)
+		p.overwrites = old.overwrites + 1
+	}
+	now := time.Now()
+	p.start = now
+	p.lastWrite = now
+	c.peers[p.id] = p
+
+	tp := c.tunnels.findTunnelPeers(p.id)
+	p.logger.Debug(context.Background(), "initial tunnel peers", slog.F("tunnel_peers", tp))
+	var others []*peer
+	for _, otherID := range tp {
+		// ok to append nil here because the batch call below filters them out
+		others = append(others, c.peers[otherID])
+	}
+	return p.batchUpdateMappingLocked(others, proto.CoordinateResponse_PeerUpdate_NODE, "init")
+}
+
+// removePeer removes and cleans up a lost peer.  It updates all peers it shares a tunnel with, deletes
+// all tunnels from which the removed peer is the source.
+func (c *core) lostPeer(p *peer) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.logger.Debug(context.Background(), "lostPeer", slog.F("peer_id", p.id))
+	if c.closed {
+		return ErrClosed
+	}
+	if existing, ok := c.peers[p.id]; !ok || existing != p {
+		return ErrAlreadyRemoved
+	}
+	c.removePeerLocked(p.id, proto.CoordinateResponse_PeerUpdate_LOST, "lost")
+	return nil
+}
+
+func (c *core) removePeerLocked(id uuid.UUID, kind proto.CoordinateResponse_PeerUpdate_Kind, reason string) {
+	p, ok := c.peers[id]
+	if !ok {
+		c.logger.Critical(context.Background(), "removed non-existent peer %s", id)
+		return
+	}
+	c.updateTunnelPeersLocked(id, nil, kind, reason)
+	c.tunnels.removeAll(id)
+	close(p.resps)
+	delete(c.peers, id)
 }
 
 // Close closes all of the open connections in the coordinator and stops the
 // coordinator from accepting new connections.
 func (c *coordinator) Close() error {
-	return c.core.close()
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	close(c.closedChan)
+	c.mu.Unlock()
+
+	err := c.core.close()
+	// wait for all request loops to complete
+	c.wg.Wait()
+	return err
 }
 
 func (c *core) close() error {
 	c.mutex.Lock()
+	defer c.mutex.Unlock()
 	if c.closed {
-		c.mutex.Unlock()
 		return nil
 	}
 	c.closed = true
-
-	wg := sync.WaitGroup{}
-
-	wg.Add(len(c.agentSockets))
-	for _, socket := range c.agentSockets {
-		socket := socket
-		go func() {
-			_ = socket.Close()
-			wg.Done()
-		}()
+	for id := range c.peers {
+		// when closing, mark them as LOST so that we don't disrupt in-progress
+		// connections.
+		c.removePeerLocked(id, proto.CoordinateResponse_PeerUpdate_LOST, "coordinator close")
 	}
-
-	for _, connMap := range c.agentToConnectionSockets {
-		wg.Add(len(connMap))
-		for _, socket := range connMap {
-			socket := socket
-			go func() {
-				_ = socket.Close()
-				wg.Done()
-			}()
-		}
-	}
-
-	c.mutex.Unlock()
-
-	wg.Wait()
 	return nil
 }
 
@@ -629,134 +496,123 @@ func (c *coordinator) ServeHTTPDebug(w http.ResponseWriter, r *http.Request) {
 	c.core.serveHTTPDebug(w, r)
 }
 
-func (c *core) serveHTTPDebug(w http.ResponseWriter, r *http.Request) {
+func (c *core) serveHTTPDebug(w http.ResponseWriter, _ *http.Request) {
+	debug := c.getHTMLDebug()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-
-	_, _ = fmt.Fprintln(w, "<h1>in-memory wireguard coordinator debug</h1>")
-
-	CoordinatorHTTPDebug(c.agentSockets, c.agentToConnectionSockets, c.agentNameCache)(w, r)
+	err := debugTempl.Execute(w, debug)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
 }
 
-func CoordinatorHTTPDebug(
-	agentSocketsMap map[uuid.UUID]*TrackedConn,
-	agentToConnectionSocketsMap map[uuid.UUID]map[uuid.UUID]*TrackedConn,
-	agentNameCache *lru.Cache[uuid.UUID, string],
-) func(w http.ResponseWriter, _ *http.Request) {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		now := time.Now()
+func (c *core) getHTMLDebug() HTMLDebug {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	debug := HTMLDebug{Tunnels: c.tunnels.htmlDebug()}
+	for _, p := range c.peers {
+		debug.Peers = append(debug.Peers, p.htmlDebug())
+	}
+	return debug
+}
 
-		type idConn struct {
-			id   uuid.UUID
-			conn *TrackedConn
+type HTMLDebug struct {
+	Peers   []HTMLPeer
+	Tunnels []HTMLTunnel
+}
+
+type HTMLPeer struct {
+	ID           uuid.UUID
+	Name         string
+	CreatedAge   time.Duration
+	LastWriteAge time.Duration
+	Overwrites   int
+	Node         string
+}
+
+type HTMLTunnel struct {
+	Src, Dst uuid.UUID
+}
+
+var coordinatorDebugTmpl = `
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="UTF-8">
+		<style>
+th, td {
+  padding-top: 6px;
+  padding-bottom: 6px;
+  padding-left: 10px;
+  padding-right: 10px;
+  text-align: left;
+}
+tr {
+  border-bottom: 1px solid #ddd;
+}
+		</style>
+	</head>
+	<body>
+		<h1>in-memory wireguard coordinator debug</h1>
+
+		<h2 id=peers> <a href=#peers>#</a> peers: total {{ len .Peers }} </h2>
+		<table>
+			<tr style="margin-top:4px">
+				<th>Name</th>
+				<th>ID</th>
+				<th>Created Age</th>
+				<th>Last Write Age</th>
+				<th>Overwrites</th>
+				<th>Node</th>
+			</tr>
+		{{- range .Peers }}
+			<tr style="margin-top:4px">
+				<td>{{ .Name }}</td>
+				<td>{{ .ID }}</td>
+				<td>{{ .CreatedAge }}</td>
+				<td>{{ .LastWriteAge }} ago</td>
+				<td>{{ .Overwrites }}</td>
+				<td style="white-space: pre;"><code>{{ .Node }}</code></td>
+			</tr>
+		{{- end }}
+		</table>
+
+		<h2 id=tunnels><a href=#tunnels>#</a> tunnels: total {{ len .Tunnels }}</h2>
+		<table>
+			<tr style="margin-top:4px">
+				<th>SrcID</th>
+				<th>DstID</th>
+			</tr>
+		{{- range .Tunnels }}
+			<tr style="margin-top:4px">
+				<td>{{ .Src }}</td>
+				<td>{{ .Dst }}</td>
+			</tr>
+		{{- end }}
+		</table>
+	</body>
+</html>
+`
+var debugTempl = template.Must(template.New("coordinator_debug").Parse(coordinatorDebugTmpl))
+
+func SendCtx[A any](ctx context.Context, c chan<- A, a A) (err error) {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case c <- a:
+		return nil
+	}
+}
+
+func RecvCtx[A any](ctx context.Context, c <-chan A) (a A, err error) {
+	select {
+	case <-ctx.Done():
+		return a, ctx.Err()
+	case a, ok := <-c:
+		if ok {
+			return a, nil
 		}
-
-		{
-			_, _ = fmt.Fprintf(w, "<h2 id=agents><a href=#agents>#</a> agents: total %d</h2>\n", len(agentSocketsMap))
-			_, _ = fmt.Fprintln(w, "<ul>")
-			agentSockets := make([]idConn, 0, len(agentSocketsMap))
-
-			for id, conn := range agentSocketsMap {
-				agentSockets = append(agentSockets, idConn{id, conn})
-			}
-
-			slices.SortFunc(agentSockets, func(a, b idConn) bool {
-				return a.conn.Name < b.conn.Name
-			})
-
-			for _, agent := range agentSockets {
-				_, _ = fmt.Fprintf(w, "<li style=\"margin-top:4px\"><b>%s</b> (<code>%s</code>): created %v ago, write %v ago, overwrites %d </li>\n",
-					agent.conn.Name,
-					agent.id.String(),
-					now.Sub(time.Unix(agent.conn.Start, 0)).Round(time.Second),
-					now.Sub(time.Unix(agent.conn.LastWrite, 0)).Round(time.Second),
-					agent.conn.Overwrites,
-				)
-
-				if conns := agentToConnectionSocketsMap[agent.id]; len(conns) > 0 {
-					_, _ = fmt.Fprintf(w, "<h3 style=\"margin:0px;font-size:16px;font-weight:400\">connections: total %d</h3>\n", len(conns))
-
-					connSockets := make([]idConn, 0, len(conns))
-					for id, conn := range conns {
-						connSockets = append(connSockets, idConn{id, conn})
-					}
-					slices.SortFunc(connSockets, func(a, b idConn) bool {
-						return a.id.String() < b.id.String()
-					})
-
-					_, _ = fmt.Fprintln(w, "<ul>")
-					for _, connSocket := range connSockets {
-						_, _ = fmt.Fprintf(w, "<li><b>%s</b> (<code>%s</code>): created %v ago, write %v ago </li>\n",
-							connSocket.conn.Name,
-							connSocket.id.String(),
-							now.Sub(time.Unix(connSocket.conn.Start, 0)).Round(time.Second),
-							now.Sub(time.Unix(connSocket.conn.LastWrite, 0)).Round(time.Second),
-						)
-					}
-					_, _ = fmt.Fprintln(w, "</ul>")
-				}
-			}
-
-			_, _ = fmt.Fprintln(w, "</ul>")
-		}
-
-		{
-			type agentConns struct {
-				id    uuid.UUID
-				conns []idConn
-			}
-
-			missingAgents := []agentConns{}
-			for agentID, conns := range agentToConnectionSocketsMap {
-				if len(conns) == 0 {
-					continue
-				}
-
-				if _, ok := agentSocketsMap[agentID]; !ok {
-					connsSlice := make([]idConn, 0, len(conns))
-					for id, conn := range conns {
-						connsSlice = append(connsSlice, idConn{id, conn})
-					}
-					slices.SortFunc(connsSlice, func(a, b idConn) bool {
-						return a.id.String() < b.id.String()
-					})
-
-					missingAgents = append(missingAgents, agentConns{agentID, connsSlice})
-				}
-			}
-			slices.SortFunc(missingAgents, func(a, b agentConns) bool {
-				return a.id.String() < b.id.String()
-			})
-
-			_, _ = fmt.Fprintf(w, "<h2 id=missing-agents><a href=#missing-agents>#</a> missing agents: total %d</h2>\n", len(missingAgents))
-			_, _ = fmt.Fprintln(w, "<ul>")
-
-			for _, agentConns := range missingAgents {
-				agentName, ok := agentNameCache.Get(agentConns.id)
-				if !ok {
-					agentName = "unknown"
-				}
-
-				_, _ = fmt.Fprintf(w, "<li style=\"margin-top:4px\"><b>%s</b> (<code>%s</code>): created ? ago, write ? ago, overwrites ? </li>\n",
-					agentName,
-					agentConns.id.String(),
-				)
-
-				_, _ = fmt.Fprintf(w, "<h3 style=\"margin:0px;font-size:16px;font-weight:400\">connections: total %d</h3>\n", len(agentConns.conns))
-				_, _ = fmt.Fprintln(w, "<ul>")
-				for _, agentConn := range agentConns.conns {
-					_, _ = fmt.Fprintf(w, "<li><b>%s</b> (<code>%s</code>): created %v ago, write %v ago </li>\n",
-						agentConn.conn.Name,
-						agentConn.id.String(),
-						now.Sub(time.Unix(agentConn.conn.Start, 0)).Round(time.Second),
-						now.Sub(time.Unix(agentConn.conn.LastWrite, 0)).Round(time.Second),
-					)
-				}
-				_, _ = fmt.Fprintln(w, "</ul>")
-			}
-			_, _ = fmt.Fprintln(w, "</ul>")
-		}
+		return a, io.EOF
 	}
 }

@@ -32,7 +32,7 @@ type WorkspaceProxyStatus struct {
 	Status ProxyHealthStatus `json:"status" table:"status,default_sort"`
 	// Report provides more information about the health of the workspace proxy.
 	Report    ProxyHealthReport `json:"report,omitempty" table:"report"`
-	CheckedAt time.Time         `json:"checked_at" table:"checked_at" format:"date-time"`
+	CheckedAt time.Time         `json:"checked_at" table:"checked at" format:"date-time"`
 }
 
 // ProxyHealthReport is a report of the health of the workspace proxy.
@@ -46,22 +46,20 @@ type ProxyHealthReport struct {
 }
 
 type WorkspaceProxy struct {
-	ID          uuid.UUID `json:"id" format:"uuid" table:"id"`
-	Name        string    `json:"name" table:"name,default_sort"`
-	DisplayName string    `json:"display_name" table:"display_name"`
-	Icon        string    `json:"icon" table:"icon"`
-	// Full url including scheme of the proxy api url: https://us.example.com
-	URL string `json:"url" table:"url"`
-	// WildcardHostname with the wildcard for subdomain based app hosting: *.us.example.com
-	WildcardHostname string    `json:"wildcard_hostname" table:"wildcard_hostname"`
-	CreatedAt        time.Time `json:"created_at" format:"date-time" table:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at" format:"date-time" table:"updated_at"`
-	Deleted          bool      `json:"deleted" table:"deleted"`
+	// Extends Region with extra information
+	Region      `table:"region,recursive_inline"`
+	DerpEnabled bool `json:"derp_enabled" table:"derp enabled"`
+	DerpOnly    bool `json:"derp_only" table:"derp only"`
 
 	// Status is the latest status check of the proxy. This will be empty for deleted
 	// proxies. This value can be used to determine if a workspace proxy is healthy
 	// and ready to use.
 	Status WorkspaceProxyStatus `json:"status,omitempty" table:"proxy,recursive"`
+
+	CreatedAt time.Time `json:"created_at" format:"date-time" table:"created at"`
+	UpdatedAt time.Time `json:"updated_at" format:"date-time" table:"updated at"`
+	Deleted   bool      `json:"deleted" table:"deleted"`
+	Version   string    `json:"version" table:"version"`
 }
 
 type CreateWorkspaceProxyRequest struct {
@@ -71,9 +69,8 @@ type CreateWorkspaceProxyRequest struct {
 }
 
 type UpdateWorkspaceProxyResponse struct {
-	Proxy WorkspaceProxy `json:"proxy" table:"proxy,recursive"`
-	// The recursive table sort is not working very well.
-	ProxyToken string `json:"proxy_token" table:"proxy token,default_sort"`
+	Proxy      WorkspaceProxy `json:"proxy" table:"p,recursive_inline"`
+	ProxyToken string         `json:"proxy_token" table:"proxy token"`
 }
 
 func (c *Client) CreateWorkspaceProxy(ctx context.Context, req CreateWorkspaceProxyRequest) (UpdateWorkspaceProxyResponse, error) {
@@ -93,21 +90,21 @@ func (c *Client) CreateWorkspaceProxy(ctx context.Context, req CreateWorkspacePr
 	return resp, json.NewDecoder(res.Body).Decode(&resp)
 }
 
-func (c *Client) WorkspaceProxies(ctx context.Context) ([]WorkspaceProxy, error) {
+func (c *Client) WorkspaceProxies(ctx context.Context) (RegionsResponse[WorkspaceProxy], error) {
 	res, err := c.Request(ctx, http.MethodGet,
 		"/api/v2/workspaceproxies",
 		nil,
 	)
 	if err != nil {
-		return nil, xerrors.Errorf("make request: %w", err)
+		return RegionsResponse[WorkspaceProxy]{}, xerrors.Errorf("make request: %w", err)
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return nil, ReadBodyAsError(res)
+		return RegionsResponse[WorkspaceProxy]{}, ReadBodyAsError(res)
 	}
 
-	var proxies []WorkspaceProxy
+	var proxies RegionsResponse[WorkspaceProxy]
 	return proxies, json.NewDecoder(res.Body).Decode(&proxies)
 }
 
@@ -179,27 +176,31 @@ func (c *Client) WorkspaceProxyByID(ctx context.Context, id uuid.UUID) (Workspac
 	return c.WorkspaceProxyByName(ctx, id.String())
 }
 
-type RegionsResponse struct {
-	Regions []Region `json:"regions"`
+type RegionTypes interface {
+	Region | WorkspaceProxy
+}
+
+type RegionsResponse[R RegionTypes] struct {
+	Regions []R `json:"regions"`
 }
 
 type Region struct {
-	ID          uuid.UUID `json:"id" format:"uuid"`
-	Name        string    `json:"name"`
-	DisplayName string    `json:"display_name"`
-	IconURL     string    `json:"icon_url"`
-	Healthy     bool      `json:"healthy"`
+	ID          uuid.UUID `json:"id" format:"uuid" table:"id"`
+	Name        string    `json:"name" table:"name,default_sort"`
+	DisplayName string    `json:"display_name" table:"display name"`
+	IconURL     string    `json:"icon_url" table:"icon url"`
+	Healthy     bool      `json:"healthy" table:"healthy"`
 
 	// PathAppURL is the URL to the base path for path apps. Optional
 	// unless wildcard_hostname is set.
 	// E.g. https://us.example.com
-	PathAppURL string `json:"path_app_url"`
+	PathAppURL string `json:"path_app_url" table:"url"`
 
 	// WildcardHostname is the wildcard hostname for subdomain apps.
 	// E.g. *.us.example.com
 	// E.g. *--suffix.au.example.com
 	// Optional. Does not need to be on the same domain as PathAppURL.
-	WildcardHostname string `json:"wildcard_hostname"`
+	WildcardHostname string `json:"wildcard_hostname" table:"wildcard hostname"`
 }
 
 func (c *Client) Regions(ctx context.Context) ([]Region, error) {
@@ -216,6 +217,6 @@ func (c *Client) Regions(ctx context.Context) ([]Region, error) {
 		return nil, ReadBodyAsError(res)
 	}
 
-	var regions RegionsResponse
+	var regions RegionsResponse[Region]
 	return regions.Regions, json.NewDecoder(res.Body).Decode(&regions)
 }

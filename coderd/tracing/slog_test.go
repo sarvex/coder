@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"cdr.dev/slog"
-	"github.com/coder/coder/coderd/tracing"
+	"github.com/coder/coder/v2/coderd/tracing"
 )
 
 type stringer string
@@ -176,6 +176,7 @@ func mapToBasicMap(m map[string]interface{}) map[string]interface{} {
 		case int32:
 			val = int64(v)
 		case uint:
+			// #nosec G115 - Safe conversion for test data
 			val = int64(v)
 		case uint8:
 			val = int64(v)
@@ -184,6 +185,7 @@ func mapToBasicMap(m map[string]interface{}) map[string]interface{} {
 		case uint32:
 			val = int64(v)
 		case uint64:
+			// #nosec G115 - Safe conversion for test data with small test values
 			val = int64(v)
 		case time.Duration:
 			val = v.String()

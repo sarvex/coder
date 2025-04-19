@@ -8,12 +8,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/coderd/audit"
-	"github.com/coder/coder/coderd/coderdtest"
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/codersdk"
+	"cdr.dev/slog/sloggers/slogtest"
+	"github.com/coder/coder/v2/coderd/audit"
+	"github.com/coder/coder/v2/coderd/coderdtest"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/rbac"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/provisioner/echo"
+	"github.com/coder/coder/v2/provisionersdk/proto"
 )
 
 func TestAuditLogs(t *testing.T) {
@@ -27,7 +32,8 @@ func TestAuditLogs(t *testing.T) {
 		user := coderdtest.CreateFirstUser(t, client)
 
 		err := client.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
-			ResourceID: user.UserID,
+			ResourceID:     user.UserID,
+			OrganizationID: user.OrganizationID,
 		})
 		require.NoError(t, err)
 
@@ -42,6 +48,56 @@ func TestAuditLogs(t *testing.T) {
 		require.Len(t, alogs.AuditLogs, 1)
 	})
 
+	t.Run("IncludeUser", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.Background()
+		client := coderdtest.New(t, nil)
+		user := coderdtest.CreateFirstUser(t, client)
+		client2, user2 := coderdtest.CreateAnotherUser(t, client, user.OrganizationID, rbac.RoleOwner())
+
+		err := client2.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
+			ResourceID:     user2.ID,
+			OrganizationID: user.OrganizationID,
+		})
+		require.NoError(t, err)
+
+		alogs, err := client.AuditLogs(ctx, codersdk.AuditLogsRequest{
+			Pagination: codersdk.Pagination{
+				Limit: 1,
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, int64(1), alogs.Count)
+		require.Len(t, alogs.AuditLogs, 1)
+
+		// Make sure the returned user is fully populated.
+		foundUser, err := client.User(ctx, user2.ID.String())
+		foundUser.OrganizationIDs = []uuid.UUID{} // Not included.
+		require.NoError(t, err)
+		require.Equal(t, foundUser, *alogs.AuditLogs[0].User)
+
+		// Delete the user and try again.  This is a soft delete so nothing should
+		// change.  If users are hard deleted we should get nil, but there is no way
+		// to test this at the moment.
+		err = client.DeleteUser(ctx, user2.ID)
+		require.NoError(t, err)
+
+		alogs, err = client.AuditLogs(ctx, codersdk.AuditLogsRequest{
+			Pagination: codersdk.Pagination{
+				Limit: 1,
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, int64(1), alogs.Count)
+		require.Len(t, alogs.AuditLogs, 1)
+
+		foundUser, err = client.User(ctx, user2.ID.String())
+		foundUser.OrganizationIDs = []uuid.UUID{} // Not included.
+		require.NoError(t, err)
+		require.Equal(t, foundUser, *alogs.AuditLogs[0].User)
+	})
+
 	t.Run("WorkspaceBuildAuditLink", func(t *testing.T) {
 		t.Parallel()
 
@@ -53,9 +109,9 @@ func TestAuditLogs(t *testing.T) {
 			template = coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
 		)
 
-		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
-		workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID)
-		coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
+		coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
+		workspace := coderdtest.CreateWorkspace(t, client, template.ID)
+		coderdtest.AwaitWorkspaceBuildJobCompleted(t, client, workspace.LatestBuild.ID)
 
 		buildResourceInfo := audit.AdditionalFields{
 			WorkspaceName: workspace.Name,
@@ -71,6 +127,7 @@ func TestAuditLogs(t *testing.T) {
 			ResourceType:     codersdk.ResourceTypeWorkspaceBuild,
 			ResourceID:       workspace.LatestBuild.ID,
 			AdditionalFields: wriBytes,
+			OrganizationID:   user.OrganizationID,
 		})
 		require.NoError(t, err)
 
@@ -84,6 +141,88 @@ func TestAuditLogs(t *testing.T) {
 		require.Equal(t, auditLogs.AuditLogs[0].ResourceLink, fmt.Sprintf("/@%s/%s/builds/%s",
 			workspace.OwnerName, workspace.Name, buildNumberString))
 	})
+
+	t.Run("Organization", func(t *testing.T) {
+		t.Parallel()
+
+		logger := slogtest.Make(t, &slogtest.Options{
+			IgnoreErrors: true,
+		})
+		ctx := context.Background()
+		client := coderdtest.New(t, &coderdtest.Options{
+			Logger: &logger,
+		})
+		owner := coderdtest.CreateFirstUser(t, client)
+		orgAdmin, _ := coderdtest.CreateAnotherUser(t, client, owner.OrganizationID, rbac.ScopedRoleOrgAdmin(owner.OrganizationID))
+
+		err := client.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
+			ResourceID:     owner.UserID,
+			OrganizationID: owner.OrganizationID,
+		})
+		require.NoError(t, err)
+
+		// Add an extra audit log in another organization
+		err = client.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
+			ResourceID:     owner.UserID,
+			OrganizationID: uuid.New(),
+		})
+		require.NoError(t, err)
+
+		// Fetching audit logs without an organization selector should only
+		// return organization audit logs the org admin is an admin of.
+		alogs, err := orgAdmin.AuditLogs(ctx, codersdk.AuditLogsRequest{
+			Pagination: codersdk.Pagination{
+				Limit: 5,
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, alogs.AuditLogs, 1)
+
+		// Using the organization selector allows the org admin to fetch audit logs
+		alogs, err = orgAdmin.AuditLogs(ctx, codersdk.AuditLogsRequest{
+			SearchQuery: fmt.Sprintf("organization:%s", owner.OrganizationID.String()),
+			Pagination: codersdk.Pagination{
+				Limit: 5,
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, alogs.AuditLogs, 1)
+
+		// Also try fetching by organization name
+		organization, err := orgAdmin.Organization(ctx, owner.OrganizationID)
+		require.NoError(t, err)
+
+		alogs, err = orgAdmin.AuditLogs(ctx, codersdk.AuditLogsRequest{
+			SearchQuery: fmt.Sprintf("organization:%s", organization.Name),
+			Pagination: codersdk.Pagination{
+				Limit: 5,
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, alogs.AuditLogs, 1)
+	})
+
+	t.Run("Organization404", func(t *testing.T) {
+		t.Parallel()
+
+		logger := slogtest.Make(t, &slogtest.Options{
+			IgnoreErrors: true,
+		})
+		ctx := context.Background()
+		client := coderdtest.New(t, &coderdtest.Options{
+			Logger: &logger,
+		})
+		owner := coderdtest.CreateFirstUser(t, client)
+		orgAdmin, _ := coderdtest.CreateAnotherUser(t, client, owner.OrganizationID, rbac.ScopedRoleOrgAdmin(owner.OrganizationID))
+
+		_, err := orgAdmin.AuditLogs(ctx, codersdk.AuditLogsRequest{
+			SearchQuery: fmt.Sprintf("organization:%s", "random-name"),
+			Pagination: codersdk.Pagination{
+				Limit: 5,
+			},
+		})
+		require.Error(t, err)
+	})
 }
 
 func TestAuditLogsFilter(t *testing.T) {
@@ -96,53 +235,102 @@ func TestAuditLogsFilter(t *testing.T) {
 			ctx      = context.Background()
 			client   = coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 			user     = coderdtest.CreateFirstUser(t, client)
-			version  = coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
+			version  = coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, completeWithAgentAndApp())
 			template = coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
 		)
 
-		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
-		workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID)
+		coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
+		workspace := coderdtest.CreateWorkspace(t, client, template.ID)
+		workspace.LatestBuild = coderdtest.AwaitWorkspaceBuildJobCompleted(t, client, workspace.LatestBuild.ID)
 
 		// Create two logs with "Create"
 		err := client.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
-			Action:       codersdk.AuditActionCreate,
-			ResourceType: codersdk.ResourceTypeTemplate,
-			ResourceID:   template.ID,
-			Time:         time.Date(2022, 8, 15, 14, 30, 45, 100, time.UTC), // 2022-8-15 14:30:45
+			OrganizationID: user.OrganizationID,
+			Action:         codersdk.AuditActionCreate,
+			ResourceType:   codersdk.ResourceTypeTemplate,
+			ResourceID:     template.ID,
+			Time:           time.Date(2022, 8, 15, 14, 30, 45, 100, time.UTC), // 2022-8-15 14:30:45
 		})
 		require.NoError(t, err)
 		err = client.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
-			Action:       codersdk.AuditActionCreate,
-			ResourceType: codersdk.ResourceTypeUser,
-			ResourceID:   user.UserID,
-			Time:         time.Date(2022, 8, 16, 14, 30, 45, 100, time.UTC), // 2022-8-16 14:30:45
+			OrganizationID: user.OrganizationID,
+			Action:         codersdk.AuditActionCreate,
+			ResourceType:   codersdk.ResourceTypeUser,
+			ResourceID:     user.UserID,
+			Time:           time.Date(2022, 8, 16, 14, 30, 45, 100, time.UTC), // 2022-8-16 14:30:45
 		})
 		require.NoError(t, err)
 
 		// Create one log with "Delete"
 		err = client.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
-			Action:       codersdk.AuditActionDelete,
-			ResourceType: codersdk.ResourceTypeUser,
-			ResourceID:   user.UserID,
-			Time:         time.Date(2022, 8, 15, 14, 30, 45, 100, time.UTC), // 2022-8-15 14:30:45
+			OrganizationID: user.OrganizationID,
+			Action:         codersdk.AuditActionDelete,
+			ResourceType:   codersdk.ResourceTypeUser,
+			ResourceID:     user.UserID,
+			Time:           time.Date(2022, 8, 15, 14, 30, 45, 100, time.UTC), // 2022-8-15 14:30:45
 		})
 		require.NoError(t, err)
 
 		// Create one log with "Start"
 		err = client.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
-			Action:       codersdk.AuditActionStart,
-			ResourceType: codersdk.ResourceTypeWorkspaceBuild,
-			ResourceID:   workspace.LatestBuild.ID,
-			Time:         time.Date(2022, 8, 15, 14, 30, 45, 100, time.UTC), // 2022-8-15 14:30:45
+			OrganizationID: user.OrganizationID,
+			Action:         codersdk.AuditActionStart,
+			ResourceType:   codersdk.ResourceTypeWorkspaceBuild,
+			ResourceID:     workspace.LatestBuild.ID,
+			Time:           time.Date(2022, 8, 15, 14, 30, 45, 100, time.UTC), // 2022-8-15 14:30:45
 		})
 		require.NoError(t, err)
 
 		// Create one log with "Stop"
 		err = client.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
-			Action:       codersdk.AuditActionStop,
-			ResourceType: codersdk.ResourceTypeWorkspaceBuild,
-			ResourceID:   workspace.LatestBuild.ID,
-			Time:         time.Date(2022, 8, 15, 14, 30, 45, 100, time.UTC), // 2022-8-15 14:30:45
+			OrganizationID: user.OrganizationID,
+			Action:         codersdk.AuditActionStop,
+			ResourceType:   codersdk.ResourceTypeWorkspaceBuild,
+			ResourceID:     workspace.LatestBuild.ID,
+			Time:           time.Date(2022, 8, 15, 14, 30, 45, 100, time.UTC), // 2022-8-15 14:30:45
+		})
+		require.NoError(t, err)
+
+		// Create one log with "Connect" and "Disconect".
+		connectRequestID := uuid.New()
+		err = client.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
+			OrganizationID: user.OrganizationID,
+			Action:         codersdk.AuditActionConnect,
+			RequestID:      connectRequestID,
+			ResourceType:   codersdk.ResourceTypeWorkspaceAgent,
+			ResourceID:     workspace.LatestBuild.Resources[0].Agents[0].ID,
+			Time:           time.Date(2022, 8, 15, 14, 30, 45, 100, time.UTC), // 2022-8-15 14:30:45
+		})
+		require.NoError(t, err)
+
+		err = client.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
+			OrganizationID: user.OrganizationID,
+			Action:         codersdk.AuditActionDisconnect,
+			RequestID:      connectRequestID,
+			ResourceType:   codersdk.ResourceTypeWorkspaceAgent,
+			ResourceID:     workspace.LatestBuild.Resources[0].Agents[0].ID,
+			Time:           time.Date(2022, 8, 15, 14, 35, 0o0, 100, time.UTC), // 2022-8-15 14:35:00
+		})
+		require.NoError(t, err)
+
+		// Create one log with "Open" and "Close".
+		openRequestID := uuid.New()
+		err = client.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
+			OrganizationID: user.OrganizationID,
+			Action:         codersdk.AuditActionOpen,
+			RequestID:      openRequestID,
+			ResourceType:   codersdk.ResourceTypeWorkspaceApp,
+			ResourceID:     workspace.LatestBuild.Resources[0].Agents[0].Apps[0].ID,
+			Time:           time.Date(2022, 8, 15, 14, 30, 45, 100, time.UTC), // 2022-8-15 14:30:45
+		})
+		require.NoError(t, err)
+		err = client.CreateTestAuditLog(ctx, codersdk.CreateTestAuditLogRequest{
+			OrganizationID: user.OrganizationID,
+			Action:         codersdk.AuditActionClose,
+			RequestID:      openRequestID,
+			ResourceType:   codersdk.ResourceTypeWorkspaceApp,
+			ResourceID:     workspace.LatestBuild.Resources[0].Agents[0].Apps[0].ID,
+			Time:           time.Date(2022, 8, 15, 14, 35, 0o0, 100, time.UTC), // 2022-8-15 14:35:00
 		})
 		require.NoError(t, err)
 
@@ -176,12 +364,12 @@ func TestAuditLogsFilter(t *testing.T) {
 			{
 				Name:           "FilterByEmail",
 				SearchQuery:    "email:" + coderdtest.FirstUserParams.Email,
-				ExpectedResult: 5,
+				ExpectedResult: 9,
 			},
 			{
 				Name:           "FilterByUsername",
 				SearchQuery:    "username:" + coderdtest.FirstUserParams.Username,
-				ExpectedResult: 5,
+				ExpectedResult: 9,
 			},
 			{
 				Name:           "FilterByResourceID",
@@ -233,6 +421,36 @@ func TestAuditLogsFilter(t *testing.T) {
 				SearchQuery:    "resource_type:workspace_build action:start build_reason:initiator",
 				ExpectedResult: 1,
 			},
+			{
+				Name:           "FilterOnWorkspaceAgentConnect",
+				SearchQuery:    "resource_type:workspace_agent action:connect",
+				ExpectedResult: 1,
+			},
+			{
+				Name:           "FilterOnWorkspaceAgentDisconnect",
+				SearchQuery:    "resource_type:workspace_agent action:disconnect",
+				ExpectedResult: 1,
+			},
+			{
+				Name:           "FilterOnWorkspaceAgentConnectionRequestID",
+				SearchQuery:    "resource_type:workspace_agent request_id:" + connectRequestID.String(),
+				ExpectedResult: 2,
+			},
+			{
+				Name:           "FilterOnWorkspaceAppOpen",
+				SearchQuery:    "resource_type:workspace_app action:open",
+				ExpectedResult: 1,
+			},
+			{
+				Name:           "FilterOnWorkspaceAppClose",
+				SearchQuery:    "resource_type:workspace_app action:close",
+				ExpectedResult: 1,
+			},
+			{
+				Name:           "FilterOnWorkspaceAppOpenRequestID",
+				SearchQuery:    "resource_type:workspace_app request_id:" + openRequestID.String(),
+				ExpectedResult: 2,
+			},
 		}
 
 		for _, testCase := range testCases {
@@ -242,9 +460,6 @@ func TestAuditLogsFilter(t *testing.T) {
 				t.Parallel()
 				auditLogs, err := client.AuditLogs(ctx, codersdk.AuditLogsRequest{
 					SearchQuery: testCase.SearchQuery,
-					Pagination: codersdk.Pagination{
-						Limit: 25,
-					},
 				})
 				if testCase.ExpectedError {
 					require.Error(t, err, "expected error")
@@ -256,4 +471,64 @@ func TestAuditLogsFilter(t *testing.T) {
 			})
 		}
 	})
+}
+
+func completeWithAgentAndApp() *echo.Responses {
+	return &echo.Responses{
+		Parse: echo.ParseComplete,
+		ProvisionPlan: []*proto.Response{
+			{
+				Type: &proto.Response_Plan{
+					Plan: &proto.PlanComplete{
+						Resources: []*proto.Resource{
+							{
+								Type: "compute",
+								Name: "main",
+								Agents: []*proto.Agent{
+									{
+										Name:            "smith",
+										OperatingSystem: "linux",
+										Architecture:    "i386",
+										Apps: []*proto.App{
+											{
+												Slug:        "app",
+												DisplayName: "App",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		ProvisionApply: []*proto.Response{
+			{
+				Type: &proto.Response_Apply{
+					Apply: &proto.ApplyComplete{
+						Resources: []*proto.Resource{
+							{
+								Type: "compute",
+								Name: "main",
+								Agents: []*proto.Agent{
+									{
+										Name:            "smith",
+										OperatingSystem: "linux",
+										Architecture:    "i386",
+										Apps: []*proto.App{
+											{
+												Slug:        "app",
+												DisplayName: "App",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
 }

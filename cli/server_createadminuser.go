@@ -4,7 +4,6 @@ package cli
 
 import (
 	"fmt"
-	"os/signal"
 	"sort"
 
 	"github.com/google/uuid"
@@ -12,28 +11,31 @@ import (
 
 	"cdr.dev/slog"
 	"cdr.dev/slog/sloggers/sloghuman"
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/cliui"
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/gitsshkey"
-	"github.com/coder/coder/coderd/httpapi"
-	"github.com/coder/coder/coderd/rbac"
-	"github.com/coder/coder/coderd/userpassword"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/awsiamrds"
+	"github.com/coder/coder/v2/coderd/database/dbtime"
+	"github.com/coder/coder/v2/coderd/gitsshkey"
+	"github.com/coder/coder/v2/coderd/httpapi"
+	"github.com/coder/coder/v2/coderd/rbac"
+	"github.com/coder/coder/v2/coderd/userpassword"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/serpent"
 )
 
-func (r *RootCmd) newCreateAdminUserCommand() *clibase.Cmd {
+func (r *RootCmd) newCreateAdminUserCommand() *serpent.Command {
 	var (
 		newUserDBURL              string
+		newUserPgAuth             string
 		newUserSSHKeygenAlgorithm string
 		newUserUsername           string
 		newUserEmail              string
 		newUserPassword           string
 	)
-	createAdminUserCommand := &clibase.Cmd{
+	createAdminUserCommand := &serpent.Command{
 		Use:   "create-admin-user",
 		Short: "Create a new admin user with the given username, email and password and adds it to every organization.",
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			ctx := inv.Context()
 
 			sshKeygenAlgorithm, err := gitsshkey.ParseAlgorithm(newUserSSHKeygenAlgorithm)
@@ -42,17 +44,17 @@ func (r *RootCmd) newCreateAdminUserCommand() *clibase.Cmd {
 			}
 
 			cfg := r.createConfig()
-			logger := slog.Make(sloghuman.Sink(inv.Stderr))
+			logger := inv.Logger.AppendSinks(sloghuman.Sink(inv.Stderr))
 			if r.verbose {
 				logger = logger.Leveled(slog.LevelDebug)
 			}
 
-			ctx, cancel := signal.NotifyContext(ctx, InterruptSignals...)
+			ctx, cancel := inv.SignalNotifyContext(ctx, StopSignals...)
 			defer cancel()
 
 			if newUserDBURL == "" {
-				cliui.Infof(inv.Stdout, "Using built-in PostgreSQL (%s)\n", cfg.PostgresPath())
-				url, closePg, err := startBuiltinPostgres(ctx, cfg, logger)
+				cliui.Infof(inv.Stdout, "Using built-in PostgreSQL (%s)", cfg.PostgresPath())
+				url, closePg, err := startBuiltinPostgres(ctx, cfg, logger, "")
 				if err != nil {
 					return err
 				}
@@ -62,7 +64,15 @@ func (r *RootCmd) newCreateAdminUserCommand() *clibase.Cmd {
 				newUserDBURL = url
 			}
 
-			sqlDB, err := connectToPostgres(ctx, logger, "postgres", newUserDBURL)
+			sqlDriver := "postgres"
+			if codersdk.PostgresAuth(newUserPgAuth) == codersdk.PostgresAuthAWSIAMRDS {
+				sqlDriver, err = awsiamrds.Register(inv.Context(), sqlDriver)
+				if err != nil {
+					return xerrors.Errorf("register aws rds iam auth: %w", err)
+				}
+			}
+
+			sqlDB, err := ConnectToPostgres(ctx, logger, sqlDriver, newUserDBURL, nil)
 			if err != nil {
 				return xerrors.Errorf("connect to postgres: %w", err)
 			}
@@ -73,11 +83,12 @@ func (r *RootCmd) newCreateAdminUserCommand() *clibase.Cmd {
 
 			validateInputs := func(username, email, password string) error {
 				// Use the validator tags so we match the API's validation.
-				req := codersdk.CreateUserRequest{
-					Username:       "username",
-					Email:          "email@coder.com",
-					Password:       "ValidPa$$word123!",
-					OrganizationID: uuid.New(),
+				req := codersdk.CreateUserRequestWithOrgs{
+					Username:        "username",
+					Name:            "Admin User",
+					Email:           "email@coder.com",
+					Password:        "ValidPa$$word123!",
+					OrganizationIDs: []uuid.UUID{uuid.New()},
 				}
 				if username != "" {
 					req.Username = username
@@ -106,6 +117,7 @@ func (r *RootCmd) newCreateAdminUserCommand() *clibase.Cmd {
 					return err
 				}
 			}
+
 			if newUserEmail == "" {
 				newUserEmail, err = cliui.Prompt(inv, cliui.PromptOptions{
 					Text: "Email",
@@ -164,7 +176,7 @@ func (r *RootCmd) newCreateAdminUserCommand() *clibase.Cmd {
 			// Create the user.
 			var newUser database.User
 			err = db.InTx(func(tx database.Store) error {
-				orgs, err := tx.GetOrganizations(ctx)
+				orgs, err := tx.GetOrganizations(ctx, database.GetOrganizationsParams{})
 				if err != nil {
 					return xerrors.Errorf("get organizations: %w", err)
 				}
@@ -179,11 +191,13 @@ func (r *RootCmd) newCreateAdminUserCommand() *clibase.Cmd {
 					ID:             uuid.New(),
 					Email:          newUserEmail,
 					Username:       newUserUsername,
+					Name:           "Admin User",
 					HashedPassword: []byte(hashedPassword),
-					CreatedAt:      database.Now(),
-					UpdatedAt:      database.Now(),
-					RBACRoles:      []string{rbac.RoleOwner()},
+					CreatedAt:      dbtime.Now(),
+					UpdatedAt:      dbtime.Now(),
+					RBACRoles:      []string{rbac.RoleOwner().String()},
 					LoginType:      database.LoginTypePassword,
+					Status:         "",
 				})
 				if err != nil {
 					return xerrors.Errorf("insert user: %w", err)
@@ -196,8 +210,8 @@ func (r *RootCmd) newCreateAdminUserCommand() *clibase.Cmd {
 				}
 				_, err = tx.InsertGitSSHKey(ctx, database.InsertGitSSHKeyParams{
 					UserID:     newUser.ID,
-					CreatedAt:  database.Now(),
-					UpdatedAt:  database.Now(),
+					CreatedAt:  dbtime.Now(),
+					UpdatedAt:  dbtime.Now(),
 					PrivateKey: privateKey,
 					PublicKey:  publicKey,
 				})
@@ -210,9 +224,9 @@ func (r *RootCmd) newCreateAdminUserCommand() *clibase.Cmd {
 					_, err := tx.InsertOrganizationMember(ctx, database.InsertOrganizationMemberParams{
 						OrganizationID: org.ID,
 						UserID:         newUser.ID,
-						CreatedAt:      database.Now(),
-						UpdatedAt:      database.Now(),
-						Roles:          []string{rbac.RoleOrgAdmin(org.ID)},
+						CreatedAt:      dbtime.Now(),
+						UpdatedAt:      dbtime.Now(),
+						Roles:          []string{rbac.RoleOrgAdmin()},
 					})
 					if err != nil {
 						return xerrors.Errorf("insert organization member: %w", err)
@@ -237,36 +251,44 @@ func (r *RootCmd) newCreateAdminUserCommand() *clibase.Cmd {
 	}
 
 	createAdminUserCommand.Options.Add(
-		clibase.Option{
-			Env:         "CODER_POSTGRES_URL",
+		serpent.Option{
+			Env:         "CODER_PG_CONNECTION_URL",
 			Flag:        "postgres-url",
 			Description: "URL of a PostgreSQL database. If empty, the built-in PostgreSQL deployment will be used (Coder must not be already running in this case).",
-			Value:       clibase.StringOf(&newUserDBURL),
+			Value:       serpent.StringOf(&newUserDBURL),
 		},
-		clibase.Option{
+		serpent.Option{
+			Name:        "Postgres Connection Auth",
+			Description: "Type of auth to use when connecting to postgres.",
+			Flag:        "postgres-connection-auth",
+			Env:         "CODER_PG_CONNECTION_AUTH",
+			Default:     "password",
+			Value:       serpent.EnumOf(&newUserPgAuth, codersdk.PostgresAuthDrivers...),
+		},
+		serpent.Option{
 			Env:         "CODER_SSH_KEYGEN_ALGORITHM",
 			Flag:        "ssh-keygen-algorithm",
 			Description: "The algorithm to use for generating ssh keys. Accepted values are \"ed25519\", \"ecdsa\", or \"rsa4096\".",
 			Default:     "ed25519",
-			Value:       clibase.StringOf(&newUserSSHKeygenAlgorithm),
+			Value:       serpent.StringOf(&newUserSSHKeygenAlgorithm),
 		},
-		clibase.Option{
+		serpent.Option{
 			Env:         "CODER_USERNAME",
 			Flag:        "username",
 			Description: "The username of the new user. If not specified, you will be prompted via stdin.",
-			Value:       clibase.StringOf(&newUserUsername),
+			Value:       serpent.StringOf(&newUserUsername),
 		},
-		clibase.Option{
+		serpent.Option{
 			Env:         "CODER_EMAIL",
 			Flag:        "email",
 			Description: "The email of the new user. If not specified, you will be prompted via stdin.",
-			Value:       clibase.StringOf(&newUserEmail),
+			Value:       serpent.StringOf(&newUserEmail),
 		},
-		clibase.Option{
+		serpent.Option{
 			Env:         "CODER_PASSWORD",
 			Flag:        "password",
 			Description: "The password of the new user. If not specified, you will be prompted via stdin.",
-			Value:       clibase.StringOf(&newUserPassword),
+			Value:       serpent.StringOf(&newUserPassword),
 		},
 	)
 

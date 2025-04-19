@@ -1,40 +1,57 @@
-import { action } from "@storybook/addon-actions"
-import { Story } from "@storybook/react"
-import { mockApiError, MockTemplate } from "testHelpers/entities"
-import {
-  TemplateSettingsPageView,
-  TemplateSettingsPageViewProps,
-} from "./TemplateSettingsPageView"
+import { action } from "@storybook/addon-actions";
+import type { Meta, StoryObj } from "@storybook/react";
+import { MockTemplate, mockApiError } from "testHelpers/entities";
+import { TemplateSettingsPageView } from "./TemplateSettingsPageView";
 
-export default {
-  title: "pages/TemplateSettingsPageView",
-  component: TemplateSettingsPageView,
-  args: {
-    template: MockTemplate,
-    onSubmit: action("onSubmit"),
-    onCancel: action("cancel"),
-  },
-}
+const meta: Meta<typeof TemplateSettingsPageView> = {
+	title: "pages/TemplateSettingsPage",
+	component: TemplateSettingsPageView,
+	args: {
+		template: MockTemplate,
+		accessControlEnabled: true,
+		advancedSchedulingEnabled: true,
+		onCancel: action("onCancel"),
+	},
+};
 
-const Template: Story<TemplateSettingsPageViewProps> = (args) => (
-  <TemplateSettingsPageView {...args} />
-)
+export default meta;
+type Story = StoryObj<typeof TemplateSettingsPageView>;
 
-export const Example = Template.bind({})
-Example.args = {}
+export const Example: Story = {};
 
-export const SaveTemplateSettingsError = Template.bind({})
-SaveTemplateSettingsError.args = {
-  submitError: mockApiError({
-    message: 'Template "test" already exists.',
-    validations: [
-      {
-        field: "name",
-        detail: "This value is already in use and should be unique.",
-      },
-    ],
-  }),
-  initialTouched: {
-    allow_user_cancel_workspace_jobs: true,
-  },
-}
+export const SaveTemplateSettingsError: Story = {
+	args: {
+		submitError: mockApiError({
+			message: 'Template "test" already exists.',
+			validations: [
+				{
+					field: "name",
+					detail: "This value is already in use and should be unique.",
+				},
+			],
+		}),
+		initialTouched: {
+			allow_user_cancel_workspace_jobs: true,
+		},
+	},
+};
+
+export const NoEntitlements: Story = {
+	args: {
+		accessControlEnabled: false,
+		advancedSchedulingEnabled: false,
+	},
+};
+
+export const NoEntitlementsExpiredSettings: Story = {
+	args: {
+		template: {
+			...MockTemplate,
+			deprecated: true,
+			deprecation_message: "This template tastes bad",
+			require_active_version: true,
+		},
+		accessControlEnabled: false,
+		advancedSchedulingEnabled: false,
+	},
+};

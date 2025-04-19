@@ -1,56 +1,13 @@
 
 syntax = "proto3";
-option go_package = "github.com/coder/coder/provisionersdk/proto";
+option go_package = "github.com/coder/coder/v2/provisionersdk/proto";
+
+import "google/protobuf/timestamp.proto";
 
 package provisioner;
 
 // Empty indicates a successful request/response.
 message Empty {}
-
-// ParameterSource represents the source location for a parameter to get it's value from.
-message ParameterSource {
-    enum Scheme {
-        DATA = 0;
-    }
-    Scheme scheme = 1;
-    string value = 2;
-}
-
-// ParameterDestination represents the target location for a provisioner to set the value.
-message ParameterDestination {
-    enum Scheme {
-        ENVIRONMENT_VARIABLE = 0;
-        PROVISIONER_VARIABLE = 1;
-    }
-    Scheme scheme = 1;
-}
-
-// ParameterValue represents the resolved source and destination of a parameter.
-message ParameterValue {
-    ParameterDestination.Scheme destination_scheme = 1;
-    string name = 2;
-    string value = 3;
-}
-
-// ParameterSchema represents validation and type information for a parsed parameter.
-message ParameterSchema {
-    string name = 1;
-    string description = 2;
-    ParameterSource default_source = 3;
-    bool allow_override_source = 4;
-    ParameterDestination default_destination = 5;
-    bool allow_override_destination = 6;
-    bool redisplay_value = 7;
-
-    enum TypeSystem {
-        None = 0;
-        HCL = 1;
-    }
-    TypeSystem validation_type_system = 8;
-    string validation_value_type = 9;
-    string validation_error = 10;
-    string validation_condition = 11;
-}
 
 // TemplateVariable represents a Terraform variable.
 message TemplateVariable {
@@ -72,6 +29,9 @@ message RichParameterOption {
 
 // RichParameter represents a variable that is exposed.
 message RichParameter {
+    reserved 14;
+    reserved "legacy_variable_name";
+
     string name = 1;
     string description = 2;
     string type = 3;
@@ -81,12 +41,14 @@ message RichParameter {
     repeated RichParameterOption options = 7;
     string validation_regex = 8;
     string validation_error = 9;
-    int32 validation_min = 10;
-    int32 validation_max = 11;
+    optional int32 validation_min = 10;
+    optional int32 validation_max = 11;
     string validation_monotonic = 12;
     bool required = 13;
-    string legacy_variable_name = 14;
+    // legacy_variable_name was removed (= 14)
     string display_name = 15;
+    int32 order = 16;
+    bool ephemeral = 17;
 }
 
 // RichParameterValue holds the key/value mapping of a parameter.
@@ -95,11 +57,27 @@ message RichParameterValue {
     string value = 2;
 }
 
+message Prebuild {
+    int32 instances = 1;
+}
+
+// Preset represents a set of preset parameters for a template version.
+message Preset {
+    string name = 1;
+    repeated PresetParameter parameters = 2;
+    Prebuild prebuild = 3;
+}
+
+message PresetParameter {
+    string name = 1;
+    string value = 2;
+}
+
 // VariableValue holds the key/value mapping of a Terraform variable.
 message VariableValue {
     string name = 1;
     string value = 2;
-	bool sensitive = 3;
+    bool sensitive = 3;
 }
 
 // LogLevel represents severity of the log.
@@ -121,9 +99,14 @@ message InstanceIdentityAuth {
     string instance_id = 1;
 }
 
-message GitAuthProvider {
-	string id = 1;
-	string access_token = 2;
+message ExternalAuthProviderResource {
+    string id = 1;
+    bool optional = 2;
+}
+
+message ExternalAuthProvider {
+    string id = 1;
+    string access_token = 2;
 }
 
 // Agent represents a running agent on the workspace.
@@ -134,11 +117,15 @@ message Agent {
         string script = 3;
         int64 interval = 4;
         int64 timeout = 5;
+        int64 order = 6;
     }
+    reserved 14;
+    reserved "login_before_ready";
+
     string id = 1;
     string name = 2;
     map<string, string> env = 3;
-    string startup_script = 4;
+	// Field 4 was startup_script, now removed.
     string operating_system = 5;
     string architecture = 6;
     string directory = 7;
@@ -147,20 +134,79 @@ message Agent {
         string token = 9;
         string instance_id = 10;
     }
-	int32 connection_timeout_seconds = 11;
-	string troubleshooting_url = 12;
-	string motd_file = 13;
-	bool login_before_ready = 14;
-	int32 startup_script_timeout_seconds = 15;
-	string shutdown_script = 16;
-	int32 shutdown_script_timeout_seconds = 17;
+    int32 connection_timeout_seconds = 11;
+    string troubleshooting_url = 12;
+    string motd_file = 13;
+    // Field 14 was bool login_before_ready = 14, now removed.
+	// Field 15, 16, 17 were related to scripts, which are now removed.
     repeated Metadata metadata = 18;
+	// Field 19 was startup_script_behavior, now removed.
+    DisplayApps display_apps = 20;
+	repeated Script scripts = 21;
+	repeated Env extra_envs = 22;
+	int64 order = 23;
+	ResourcesMonitoring resources_monitoring = 24;
+	repeated Devcontainer devcontainers = 25;
 }
 
 enum AppSharingLevel {
     OWNER = 0;
     AUTHENTICATED = 1;
     PUBLIC = 2;
+}
+
+message ResourcesMonitoring {
+	MemoryResourceMonitor memory = 1;
+	repeated VolumeResourceMonitor volumes = 2;
+}
+
+message MemoryResourceMonitor {
+	bool enabled = 1;
+	int32 threshold = 2;
+}
+
+message VolumeResourceMonitor {
+	string path = 1;
+	bool enabled = 2;
+	int32 threshold = 3;
+}
+
+message DisplayApps {
+    bool vscode = 1;
+    bool vscode_insiders = 2;
+    bool web_terminal = 3;
+    bool ssh_helper = 4;
+    bool port_forwarding_helper = 5;
+}
+
+message Env {
+	string name = 1;
+	string value = 2;
+}
+
+// Script represents a script to be run on the workspace.
+message Script {
+	string display_name = 1;
+	string icon = 2;
+	string script = 3;
+	string cron = 4;
+	bool start_blocks_login = 5;
+	bool run_on_start = 6;
+	bool run_on_stop = 7;
+	int32 timeout_seconds = 8;
+	string log_path = 9;
+}
+
+message Devcontainer {
+	string workspace_folder = 1;
+	string config_path = 2;
+	string name = 3;
+}
+
+enum AppOpenIn {
+    WINDOW = 0 [deprecated = true];
+    SLIM_WINDOW = 1;
+    TAB = 2;
 }
 
 // App represents a dev-accessible application on the workspace.
@@ -176,6 +222,9 @@ message App {
     Healthcheck healthcheck = 7;
     AppSharingLevel sharing_level = 8;
     bool external = 9;
+    int64 order = 10;
+    bool hidden = 11;
+    AppOpenIn open_in = 12;
 }
 
 // Healthcheck represents configuration for checking for app readiness.
@@ -202,95 +251,157 @@ message Resource {
     string icon = 6;
     string instance_type = 7;
     int32 daily_cost = 8;
+    string module_path = 9;
 }
 
-// Parse consumes source-code from a directory to produce inputs.
-message Parse {
-    message Request {
-        string directory = 1;
-    }
-    message Complete {
-        repeated TemplateVariable template_variables = 1;
-        repeated ParameterSchema parameter_schemas = 2;
-    }
-    message Response {
-        oneof type {
-            Log log = 1;
-            Complete complete = 2;
-        }
-    }
+message Module {
+    string source = 1;
+    string version = 2;
+    string key = 3;
 }
 
+// WorkspaceTransition is the desired outcome of a build
 enum WorkspaceTransition {
     START = 0;
     STOP = 1;
     DESTROY = 2;
 }
 
-// Provision consumes source-code from a directory to produce resources.
-// Exactly one of Plan or Apply must be provided in a single session.
-message Provision {
-    message Metadata {
-        string coder_url = 1;
-        WorkspaceTransition workspace_transition = 2;
-        string workspace_name = 3;
-        string workspace_owner = 4;
-        string workspace_id = 5;
-        string workspace_owner_id = 6;
-        string workspace_owner_email = 7;
-        string template_name = 8;
-        string template_version = 9;
-        string workspace_owner_oidc_access_token = 10;
-    }
+message Role {
+    string name = 1;
+    string org_id = 2;
+}
 
-    // Config represents execution configuration shared by both Plan and
-    // Apply commands.
-    message Config {
-        string directory = 1;
-        bytes state = 2;
-        Metadata metadata = 3;
+// Metadata is information about a workspace used in the execution of a build
+message Metadata {
+    string coder_url = 1;
+    WorkspaceTransition workspace_transition = 2;
+    string workspace_name = 3;
+    string workspace_owner = 4;
+    string workspace_id = 5;
+    string workspace_owner_id = 6;
+    string workspace_owner_email = 7;
+    string template_name = 8;
+    string template_version = 9;
+    string workspace_owner_oidc_access_token = 10;
+    string workspace_owner_session_token = 11;
+    string template_id = 12;
+    string workspace_owner_name = 13;
+    repeated string workspace_owner_groups = 14;
+    string workspace_owner_ssh_public_key = 15;
+    string workspace_owner_ssh_private_key = 16;
+    string workspace_build_id = 17;
+    string workspace_owner_login_type =  18;
+    repeated Role workspace_owner_rbac_roles = 19;
+    bool is_prebuild = 20;
+    string running_workspace_agent_token = 21;
+}
 
-        string provisioner_log_level = 4;
-    }
+// Config represents execution configuration shared by all subsequent requests in the Session
+message Config {
+    // template_source_archive is a tar of the template source files
+    bytes template_source_archive = 1;
+    // state is the provisioner state (if any)
+    bytes state = 2;
+    string provisioner_log_level = 3;
+}
 
-    message Plan {
+// ParseRequest consumes source-code to produce inputs.
+message ParseRequest {
+}
+
+// ParseComplete indicates a request to parse completed.
+message ParseComplete {
+    string error = 1;
+    repeated TemplateVariable template_variables = 2;
+    bytes readme = 3;
+    map<string, string> workspace_tags = 4;
+}
+
+// PlanRequest asks the provisioner to plan what resources & parameters it will create
+message PlanRequest {
+    Metadata metadata = 1;
+    repeated RichParameterValue rich_parameter_values = 2;
+    repeated VariableValue variable_values = 3;
+    repeated ExternalAuthProvider external_auth_providers = 4;
+}
+
+// PlanComplete indicates a request to plan completed.
+message PlanComplete {
+    string error = 1;
+    repeated Resource resources = 2;
+    repeated RichParameter parameters = 3;
+    repeated ExternalAuthProviderResource external_auth_providers = 4;
+    repeated Timing timings = 6;
+    repeated Module modules = 7;
+    repeated Preset presets = 8;
+    bytes plan = 9;
+}
+
+// ApplyRequest asks the provisioner to apply the changes.  Apply MUST be preceded by a successful plan request/response
+// in the same Session.  The plan data is not transmitted over the wire and is cached by the provisioner in the Session.
+message ApplyRequest {
+    Metadata metadata = 1;
+}
+
+// ApplyComplete indicates a request to apply completed.
+message ApplyComplete {
+    bytes state = 1;
+    string error = 2;
+    repeated Resource resources = 3;
+    repeated RichParameter parameters = 4;
+    repeated ExternalAuthProviderResource external_auth_providers = 5;
+    repeated Timing timings = 6;
+}
+
+message Timing {
+    google.protobuf.Timestamp start = 1;
+    google.protobuf.Timestamp end = 2;
+    string action = 3;
+    string source = 4;
+    string resource = 5;
+    string stage = 6;
+    TimingState state = 7;
+}
+
+enum TimingState {
+    STARTED = 0;
+    COMPLETED = 1;
+    FAILED = 2;
+}
+
+// CancelRequest requests that the previous request be canceled gracefully.
+message CancelRequest {}
+
+message Request {
+    oneof type {
         Config config = 1;
-        repeated ParameterValue parameter_values = 2;
-        repeated RichParameterValue rich_parameter_values = 3;
-        repeated VariableValue variable_values = 4;
-        repeated GitAuthProvider git_auth_providers = 5;
+        ParseRequest parse = 2;
+        PlanRequest plan = 3;
+        ApplyRequest apply = 4;
+        CancelRequest cancel = 5;
     }
+}
 
-    message Apply {
-        Config config = 1;
-        bytes plan = 2;
-    }
-
-    message Cancel {}
-    message Request {
-        oneof type {
-            Plan plan = 1;
-            Apply apply = 2;
-            Cancel cancel = 3;
-        }
-    }
-    message Complete {
-        bytes state = 1;
-        string error = 2;
-        repeated Resource resources = 3;
-		repeated RichParameter parameters = 4;
-		repeated string git_auth_providers = 5;
-		bytes plan = 6;
-    }
-    message Response {
-        oneof type {
-            Log log = 1;
-            Complete complete = 2;
-        }
+message Response {
+    oneof type {
+        Log log = 1;
+        ParseComplete parse = 2;
+        PlanComplete plan = 3;
+        ApplyComplete apply = 4;
     }
 }
 
 service Provisioner {
-    rpc Parse(Parse.Request) returns (stream Parse.Response);
-    rpc Provision(stream Provision.Request) returns (stream Provision.Response);
+    // Session represents provisioning a single template import or workspace.  The daemon always sends Config followed
+    // by one of the requests (ParseRequest, PlanRequest, ApplyRequest).  The provisioner should respond with a stream
+    // of zero or more Logs, followed by the corresponding complete message (ParseComplete, PlanComplete,
+    // ApplyComplete).  The daemon may then send a new request.  A request to apply MUST be preceded by a request plan,
+    // and the provisioner should store the plan data on the Session after a successful plan, so that the daemon may
+    // request an apply.  If the daemon closes the Session without an apply, the plan data may be safely discarded.
+    //
+    // The daemon may send a CancelRequest, asynchronously to ask the provisioner to cancel the previous ParseRequest,
+    // PlanRequest, or ApplyRequest.  The provisioner MUST reply with a complete message corresponding to the request
+    // that was canceled.  If the provisioner has already completed the request, it may ignore the CancelRequest.
+    rpc Session(stream Request) returns (stream Response);
 }

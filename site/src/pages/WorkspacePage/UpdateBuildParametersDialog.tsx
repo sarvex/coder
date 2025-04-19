@@ -1,160 +1,136 @@
-import { makeStyles } from "@mui/styles"
-import Dialog from "@mui/material/Dialog"
-import DialogContent from "@mui/material/DialogContent"
-import DialogContentText from "@mui/material/DialogContentText"
-import DialogTitle from "@mui/material/DialogTitle"
-import { DialogProps } from "components/Dialogs/Dialog"
-import { FC } from "react"
-import { getFormHelpers } from "utils/formUtils"
-import { FormFields, VerticalForm } from "components/Form/Form"
+import { css } from "@emotion/css";
+import type { Interpolation, Theme } from "@emotion/react";
+import Button from "@mui/material/Button";
+import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
+import DialogContent from "@mui/material/DialogContent";
+import DialogContentText from "@mui/material/DialogContentText";
+import DialogTitle from "@mui/material/DialogTitle";
+import type {
+	TemplateVersionParameter,
+	WorkspaceBuildParameter,
+} from "api/typesGenerated";
+import type { DialogProps } from "components/Dialogs/Dialog";
+import { FormFields, VerticalForm } from "components/Form/Form";
+import { RichParameterInput } from "components/RichParameterInput/RichParameterInput";
+import { useFormik } from "formik";
+import type { FC } from "react";
+import { getFormHelpers } from "utils/formUtils";
 import {
-  TemplateVersionParameter,
-  WorkspaceBuildParameter,
-} from "api/typesGenerated"
-import { RichParameterInput } from "components/RichParameterInput/RichParameterInput"
-import { useFormik } from "formik"
-import {
-  selectInitialRichParametersValues,
-  useValidationSchemaForRichParameters,
-} from "utils/richParameters"
-import * as Yup from "yup"
-import DialogActions from "@mui/material/DialogActions"
-import Button from "@mui/material/Button"
-import { useTranslation } from "react-i18next"
+	getInitialRichParameterValues,
+	useValidationSchemaForRichParameters,
+} from "utils/richParameters";
+import * as Yup from "yup";
 
 export type UpdateBuildParametersDialogProps = DialogProps & {
-  onClose: () => void
-  onUpdate: (buildParameters: WorkspaceBuildParameter[]) => void
-  missedParameters?: TemplateVersionParameter[]
-}
+	onClose: () => void;
+	onUpdate: (buildParameters: WorkspaceBuildParameter[]) => void;
+	missedParameters: TemplateVersionParameter[];
+};
 
 export const UpdateBuildParametersDialog: FC<
-  UpdateBuildParametersDialogProps
+	UpdateBuildParametersDialogProps
 > = ({ missedParameters, onUpdate, ...dialogProps }) => {
-  const styles = useStyles()
-  const form = useFormik({
-    initialValues: {
-      rich_parameter_values:
-        selectInitialRichParametersValues(missedParameters),
-    },
-    validationSchema: Yup.object({
-      rich_parameter_values: useValidationSchemaForRichParameters(
-        "createWorkspacePage",
-        missedParameters,
-      ),
-    }),
-    onSubmit: (values) => {
-      onUpdate(values.rich_parameter_values)
-    },
-  })
-  const getFieldHelpers = getFormHelpers(form)
-  const { t } = useTranslation("workspacePage")
+	const form = useFormik({
+		initialValues: {
+			rich_parameter_values: getInitialRichParameterValues(missedParameters),
+		},
+		validationSchema: Yup.object({
+			rich_parameter_values:
+				useValidationSchemaForRichParameters(missedParameters),
+		}),
+		onSubmit: (values) => {
+			onUpdate(values.rich_parameter_values);
+		},
+		enableReinitialize: true,
+	});
+	const getFieldHelpers = getFormHelpers(form);
 
-  return (
-    <Dialog
-      {...dialogProps}
-      scroll="body"
-      aria-labelledby="update-build-parameters-title"
-      maxWidth="xs"
-      data-testid="dialog"
-    >
-      <DialogTitle
-        id="update-build-parameters-title"
-        classes={{ root: styles.title }}
-      >
-        Workspace parameters
-      </DialogTitle>
-      <DialogContent className={styles.content}>
-        <DialogContentText className={styles.info}>
-          {t("askParametersDialog.message")}
-        </DialogContentText>
-        <VerticalForm
-          className={styles.form}
-          onSubmit={form.handleSubmit}
-          id="updateParameters"
-        >
-          {missedParameters && (
-            <FormFields>
-              {missedParameters.map((parameter, index) => {
-                return (
-                  <RichParameterInput
-                    {...getFieldHelpers(
-                      "rich_parameter_values[" + index + "].value",
-                    )}
-                    key={parameter.name}
-                    parameter={parameter}
-                    initialValue=""
-                    index={index}
-                    onChange={async (value) => {
-                      await form.setFieldValue(
-                        "rich_parameter_values." + index,
-                        {
-                          name: parameter.name,
-                          value: value,
-                        },
-                      )
-                    }}
-                  />
-                )
-              })}
-            </FormFields>
-          )}
-        </VerticalForm>
-      </DialogContent>
-      <DialogActions disableSpacing className={styles.dialogActions}>
-        <Button fullWidth type="button" onClick={dialogProps.onClose}>
-          Cancel
-        </Button>
-        <Button color="primary" fullWidth type="submit" form="updateParameters">
-          Update
-        </Button>
-      </DialogActions>
-    </Dialog>
-  )
-}
+	return (
+		<Dialog
+			{...dialogProps}
+			scroll="body"
+			aria-labelledby="update-build-parameters-title"
+			maxWidth="xs"
+			data-testid="dialog"
+		>
+			<DialogTitle
+				id="update-build-parameters-title"
+				classes={{ root: classNames.root }}
+			>
+				Workspace parameters
+			</DialogTitle>
+			<DialogContent css={styles.content}>
+				<DialogContentText css={{ margin: 0 }}>
+					This template has new parameters that must be configured to complete
+					the update
+				</DialogContentText>
+				<VerticalForm
+					css={styles.form}
+					onSubmit={form.handleSubmit}
+					id="updateParameters"
+				>
+					{missedParameters && (
+						<FormFields>
+							{missedParameters.map((parameter, index) => {
+								return (
+									<RichParameterInput
+										{...getFieldHelpers(
+											`rich_parameter_values[${index}].value`,
+										)}
+										key={parameter.name}
+										parameter={parameter}
+										onChange={async (value) => {
+											await form.setFieldValue(
+												`rich_parameter_values.${index}`,
+												{
+													name: parameter.name,
+													value: value,
+												},
+											);
+										}}
+									/>
+								);
+							})}
+						</FormFields>
+					)}
+				</VerticalForm>
+			</DialogContent>
+			<DialogActions disableSpacing css={styles.dialogActions}>
+				<Button fullWidth type="button" onClick={dialogProps.onClose}>
+					Cancel
+				</Button>
+				<Button color="primary" fullWidth type="submit" form="updateParameters">
+					Update parameters
+				</Button>
+			</DialogActions>
+		</Dialog>
+	);
+};
 
-const useStyles = makeStyles((theme) => ({
-  title: {
-    padding: theme.spacing(3, 5),
+const classNames = {
+	root: css`
+    padding: 24px 40px;
 
-    "& h2": {
-      fontSize: theme.spacing(2.5),
-      fontWeight: 400,
-    },
-  },
+    & h2 {
+      font-size: 20px;
+      font-weight: 400;
+    }
+  `,
+};
 
-  content: {
-    padding: theme.spacing(0, 5, 0, 5),
-  },
+const styles = {
+	content: {
+		padding: "0 40px",
+	},
 
-  info: {
-    margin: 0,
-  },
+	form: {
+		paddingTop: 32,
+	},
 
-  form: {
-    paddingTop: theme.spacing(4),
-  },
-
-  infoTitle: {
-    fontSize: theme.spacing(2),
-    fontWeight: 600,
-    display: "flex",
-    alignItems: "center",
-    gap: theme.spacing(1),
-  },
-
-  warningIcon: {
-    color: theme.palette.warning.light,
-    fontSize: theme.spacing(1.5),
-  },
-
-  formFooter: {
-    flexDirection: "column",
-  },
-
-  dialogActions: {
-    padding: theme.spacing(5),
-    flexDirection: "column",
-    gap: theme.spacing(1),
-  },
-}))
+	dialogActions: {
+		padding: 40,
+		flexDirection: "column",
+		gap: 8,
+	},
+} satisfies Record<string, Interpolation<Theme>>;

@@ -1,107 +1,129 @@
-import { makeStyles } from "@mui/styles"
-import { PropsWithChildren, FC } from "react"
-import { combineClasses } from "../../utils/combineClasses"
-import { Stack } from "../Stack/Stack"
+import type { FC, PropsWithChildren, ReactNode } from "react";
+import { Stack } from "../Stack/Stack";
 
 export interface PageHeaderProps {
-  actions?: JSX.Element
-  className?: string
+	actions?: ReactNode;
+	className?: string;
+	children?: ReactNode;
 }
 
-export const PageHeader: FC<PropsWithChildren<PageHeaderProps>> = ({
-  children,
-  actions,
-  className,
+export const PageHeader: FC<PageHeaderProps> = ({
+	children,
+	actions,
+	className,
 }) => {
-  const styles = useStyles({})
+	return (
+		<header
+			className={className}
+			css={(theme) => ({
+				display: "flex",
+				alignItems: "center",
+				paddingTop: 48,
+				paddingBottom: 48,
+				gap: 32,
 
-  return (
-    <header
-      className={combineClasses([styles.root, className])}
-      data-testid="header"
-    >
-      <hgroup>{children}</hgroup>
-      {actions && (
-        <Stack direction="row" className={styles.actions}>
-          {actions}
-        </Stack>
-      )}
-    </header>
-  )
+				[theme.breakpoints.down("md")]: {
+					flexDirection: "column",
+					alignItems: "flex-start",
+				},
+			})}
+			data-testid="header"
+		>
+			<hgroup>{children}</hgroup>
+			{actions && (
+				<Stack
+					direction="row"
+					css={(theme) => ({
+						marginLeft: "auto",
+
+						[theme.breakpoints.down("md")]: {
+							marginLeft: "initial",
+							width: "100%",
+						},
+					})}
+				>
+					{actions}
+				</Stack>
+			)}
+		</header>
+	);
+};
+
+export const PageHeaderTitle: FC<PropsWithChildren> = ({ children }) => {
+	return (
+		<h1
+			css={{
+				fontSize: 24,
+				fontWeight: 400,
+				margin: 0,
+				display: "flex",
+				alignItems: "center",
+				lineHeight: "140%",
+			}}
+		>
+			{children}
+		</h1>
+	);
+};
+
+interface PageHeaderSubtitleProps {
+	children?: ReactNode;
+	condensed?: boolean;
 }
 
-export const PageHeaderTitle: FC<PropsWithChildren<unknown>> = ({
-  children,
+export const PageHeaderSubtitle: FC<PageHeaderSubtitleProps> = ({
+	children,
+	condensed,
 }) => {
-  const styles = useStyles({})
-
-  return <h1 className={styles.title}>{children}</h1>
-}
-
-export const PageHeaderSubtitle: FC<
-  PropsWithChildren<{ condensed?: boolean }>
-> = ({ children, condensed }) => {
-  const styles = useStyles({
-    condensed,
-  })
-
-  return <h2 className={styles.subtitle}>{children}</h2>
-}
+	return (
+		<h2
+			css={(theme) => ({
+				fontSize: 16,
+				color: theme.palette.text.secondary,
+				fontWeight: 400,
+				display: "block",
+				margin: 0,
+				marginTop: condensed ? 4 : 8,
+				lineHeight: "140%",
+			})}
+		>
+			{children}
+		</h2>
+	);
+};
 
 export const PageHeaderCaption: FC<PropsWithChildren> = ({ children }) => {
-  const styles = useStyles({})
-  return <span className={styles.caption}>{children}</span>
+	return (
+		<span
+			css={(theme) => ({
+				fontSize: 12,
+				color: theme.palette.text.secondary,
+				fontWeight: 600,
+				textTransform: "uppercase",
+				letterSpacing: "0.1em",
+			})}
+		>
+			{children}
+		</span>
+	);
+};
+
+interface ResourcePageHeaderProps extends Omit<PageHeaderProps, "children"> {
+	displayName?: string;
+	name: string;
 }
 
-const useStyles = makeStyles((theme) => ({
-  root: {
-    display: "flex",
-    alignItems: "center",
-    paddingTop: theme.spacing(6),
-    paddingBottom: theme.spacing(6),
-    gap: theme.spacing(4),
+export const ResourcePageHeader: FC<ResourcePageHeaderProps> = ({
+	displayName,
+	name,
+	...props
+}) => {
+	const title = displayName || name;
 
-    [theme.breakpoints.down("md")]: {
-      flexDirection: "column",
-      alignItems: "flex-start",
-    },
-  },
-
-  title: {
-    fontSize: theme.spacing(3),
-    fontWeight: 400,
-    margin: 0,
-    display: "flex",
-    alignItems: "center",
-    lineHeight: "140%",
-  },
-
-  subtitle: {
-    fontSize: theme.spacing(2),
-    color: theme.palette.text.secondary,
-    fontWeight: 400,
-    display: "block",
-    margin: 0,
-    marginTop: ({ condensed }: { condensed?: boolean }) =>
-      condensed ? theme.spacing(0.5) : theme.spacing(1),
-    lineHeight: "140%",
-  },
-
-  actions: {
-    marginLeft: "auto",
-
-    [theme.breakpoints.down("md")]: {
-      marginTop: theme.spacing(3),
-      marginLeft: "initial",
-      width: "100%",
-    },
-  },
-
-  caption: {
-    fontSize: 12,
-    color: theme.palette.text.secondary,
-    fontWeight: 600,
-    textTransform: "uppercase",
-    letterSpacing: "0.1em",
-  },
-}))
+	return (
+		<PageHeader {...props}>
+			<PageHeaderTitle>{title}</PageHeaderTitle>
+			{name !== title && <PageHeaderSubtitle>{name}</PageHeaderSubtitle>}
+		</PageHeader>
+	);
+};

@@ -1,10 +1,17 @@
-Usage: coder delete [flags] <workspace>
+coder v0.0.0-devel
 
-Delete a workspace
+USAGE:
+  coder delete [flags] <workspace>
 
-Aliases: rm
+  Delete a workspace
 
-[1mOptions[0m
+  Aliases: rm
+
+    - Delete a workspace for another user (if you have permission):
+  
+       $ coder delete <username>/<workspace_name>
+
+OPTIONS:
       --orphan bool
           Delete a workspace without deleting its resources. This can delete a
           workspace in a broken state, but may also lead to unaccounted cloud
@@ -13,5 +20,5 @@ Aliases: rm
   -y, --yes bool
           Bypass prompts.
 
----
+———
 Run `coder --help` for a list of global options.

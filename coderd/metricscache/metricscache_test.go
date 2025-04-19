@@ -3,200 +3,121 @@ package metricscache_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
-	"cdr.dev/slog/sloggers/slogtest"
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/database/dbfake"
-	"github.com/coder/coder/coderd/database/dbgen"
-	"github.com/coder/coder/coderd/metricscache"
-	"github.com/coder/coder/codersdk"
-	"github.com/coder/coder/testutil"
+	"cdr.dev/slog"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbauthz"
+	"github.com/coder/coder/v2/coderd/database/dbgen"
+	"github.com/coder/coder/v2/coderd/database/dbtestutil"
+	"github.com/coder/coder/v2/coderd/metricscache"
+	"github.com/coder/coder/v2/coderd/rbac"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/testutil"
+	"github.com/coder/quartz"
 )
 
 func date(year, month, day int) time.Time {
 	return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
 }
 
-func TestCache_TemplateUsers(t *testing.T) {
-	t.Parallel()
+func newMetricsCache(t *testing.T, log slog.Logger, clock quartz.Clock, intervals metricscache.Intervals, usage bool) (*metricscache.Cache, database.Store) {
+	t.Helper()
+
+	accessControlStore := &atomic.Pointer[dbauthz.AccessControlStore]{}
+	var acs dbauthz.AccessControlStore = dbauthz.AGPLTemplateAccessControlStore{}
+	accessControlStore.Store(&acs)
 
 	var (
-		zebra = uuid.UUID{1}
-		tiger = uuid.UUID{2}
+		auth   = rbac.NewStrictCachingAuthorizer(prometheus.NewRegistry())
+		db, _  = dbtestutil.NewDB(t)
+		dbauth = dbauthz.New(db, auth, log, accessControlStore)
+		cache  = metricscache.New(dbauth, log, clock, intervals, usage)
 	)
 
-	type args struct {
-		rows []database.InsertWorkspaceAgentStatParams
-	}
-	type want struct {
-		entries     []codersdk.DAUEntry
-		uniqueUsers int
-	}
-	tests := []struct {
-		name string
-		args args
-		want want
-	}{
-		{"empty", args{}, want{nil, 0}},
-		{
-			"one hole", args{
-				rows: []database.InsertWorkspaceAgentStatParams{
-					{
-						CreatedAt: date(2022, 8, 27),
-						UserID:    zebra,
-					},
-					{
-						CreatedAt: date(2022, 8, 30),
-						UserID:    zebra,
-					},
-				},
-			}, want{[]codersdk.DAUEntry{
-				{
-					Date:   date(2022, 8, 27),
-					Amount: 1,
-				},
-				{
-					Date:   date(2022, 8, 28),
-					Amount: 0,
-				},
-				{
-					Date:   date(2022, 8, 29),
-					Amount: 0,
-				},
-				{
-					Date:   date(2022, 8, 30),
-					Amount: 1,
-				},
-			}, 1},
-		},
-		{"no holes", args{
-			rows: []database.InsertWorkspaceAgentStatParams{
-				{
-					CreatedAt: date(2022, 8, 27),
-					UserID:    zebra,
-				},
-				{
-					CreatedAt: date(2022, 8, 28),
-					UserID:    zebra,
-				},
-				{
-					CreatedAt: date(2022, 8, 29),
-					UserID:    zebra,
-				},
-			},
-		}, want{[]codersdk.DAUEntry{
-			{
-				Date:   date(2022, 8, 27),
-				Amount: 1,
-			},
-			{
-				Date:   date(2022, 8, 28),
-				Amount: 1,
-			},
-			{
-				Date:   date(2022, 8, 29),
-				Amount: 1,
-			},
-		}, 1}},
-		{"holes", args{
-			rows: []database.InsertWorkspaceAgentStatParams{
-				{
-					CreatedAt: date(2022, 1, 1),
-					UserID:    zebra,
-				},
-				{
-					CreatedAt: date(2022, 1, 1),
-					UserID:    tiger,
-				},
-				{
-					CreatedAt: date(2022, 1, 4),
-					UserID:    zebra,
-				},
-				{
-					CreatedAt: date(2022, 1, 7),
-					UserID:    zebra,
-				},
-				{
-					CreatedAt: date(2022, 1, 7),
-					UserID:    tiger,
-				},
-			},
-		}, want{[]codersdk.DAUEntry{
-			{
-				Date:   date(2022, 1, 1),
-				Amount: 2,
-			},
-			{
-				Date:   date(2022, 1, 2),
-				Amount: 0,
-			},
-			{
-				Date:   date(2022, 1, 3),
-				Amount: 0,
-			},
-			{
-				Date:   date(2022, 1, 4),
-				Amount: 1,
-			},
-			{
-				Date:   date(2022, 1, 5),
-				Amount: 0,
-			},
-			{
-				Date:   date(2022, 1, 6),
-				Amount: 0,
-			},
-			{
-				Date:   date(2022, 1, 7),
-				Amount: 2,
-			},
-		}, 2}},
-	}
+	t.Cleanup(func() { cache.Close() })
 
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			var (
-				db    = dbfake.New()
-				cache = metricscache.New(db, slogtest.Make(t, nil), metricscache.Intervals{
-					TemplateDAUs: testutil.IntervalFast,
-				})
-			)
+	return cache, db
+}
 
-			defer cache.Close()
+func TestCache_TemplateWorkspaceOwners(t *testing.T) {
+	t.Parallel()
+	var ()
 
-			template := dbgen.Template(t, db, database.Template{
-				Provisioner: database.ProvisionerTypeEcho,
-			})
+	var (
+		log       = testutil.Logger(t)
+		clock     = quartz.NewReal()
+		cache, db = newMetricsCache(t, log, clock, metricscache.Intervals{
+			TemplateBuildTimes: testutil.IntervalFast,
+		}, false)
+	)
 
-			for _, row := range tt.args.rows {
-				row.TemplateID = template.ID
-				row.ConnectionCount = 1
-				db.InsertWorkspaceAgentStat(context.Background(), row)
-			}
+	org := dbgen.Organization(t, db, database.Organization{})
+	user1 := dbgen.User(t, db, database.User{})
+	user2 := dbgen.User(t, db, database.User{})
+	template := dbgen.Template(t, db, database.Template{
+		OrganizationID: org.ID,
+		Provisioner:    database.ProvisionerTypeEcho,
+		CreatedBy:      user1.ID,
+	})
+	require.Eventuallyf(t, func() bool {
+		count, ok := cache.TemplateWorkspaceOwners(template.ID)
+		return ok && count == 0
+	}, testutil.WaitShort, testutil.IntervalMedium,
+		"TemplateWorkspaceOwners never populated 0 owners",
+	)
 
-			require.Eventuallyf(t, func() bool {
-				_, ok := cache.TemplateDAUs(template.ID)
-				return ok
-			}, testutil.WaitShort, testutil.IntervalMedium,
-				"TemplateDAUs never populated",
-			)
+	dbgen.Workspace(t, db, database.WorkspaceTable{
+		OrganizationID: org.ID,
+		TemplateID:     template.ID,
+		OwnerID:        user1.ID,
+	})
 
-			gotUniqueUsers, ok := cache.TemplateUniqueUsers(template.ID)
-			require.True(t, ok)
+	require.Eventuallyf(t, func() bool {
+		count, _ := cache.TemplateWorkspaceOwners(template.ID)
+		return count == 1
+	}, testutil.WaitShort, testutil.IntervalMedium,
+		"TemplateWorkspaceOwners never populated 1 owner",
+	)
 
-			gotEntries, ok := cache.TemplateDAUs(template.ID)
-			require.True(t, ok)
-			require.Equal(t, tt.want.entries, gotEntries.Entries)
-			require.Equal(t, tt.want.uniqueUsers, gotUniqueUsers)
-		})
-	}
+	workspace2 := dbgen.Workspace(t, db, database.WorkspaceTable{
+		OrganizationID: org.ID,
+		TemplateID:     template.ID,
+		OwnerID:        user2.ID,
+	})
+
+	require.Eventuallyf(t, func() bool {
+		count, _ := cache.TemplateWorkspaceOwners(template.ID)
+		return count == 2
+	}, testutil.WaitShort, testutil.IntervalMedium,
+		"TemplateWorkspaceOwners never populated 2 owners",
+	)
+
+	// 3rd workspace should not be counted since we have the same owner as workspace2.
+	dbgen.Workspace(t, db, database.WorkspaceTable{
+		OrganizationID: org.ID,
+		TemplateID:     template.ID,
+		OwnerID:        user1.ID,
+	})
+
+	db.UpdateWorkspaceDeletedByID(context.Background(), database.UpdateWorkspaceDeletedByIDParams{
+		ID:      workspace2.ID,
+		Deleted: true,
+	})
+
+	require.Eventuallyf(t, func() bool {
+		count, _ := cache.TemplateWorkspaceOwners(template.ID)
+		return count == 1
+	}, testutil.WaitShort, testutil.IntervalMedium,
+		"TemplateWorkspaceOwners never populated 1 owner after delete",
+	)
 }
 
 func clockTime(t time.Time, hour, minute, sec int) time.Time {
@@ -257,7 +178,7 @@ func TestCache_BuildTime(t *testing.T) {
 					},
 				},
 				transition: database.WorkspaceTransitionStop,
-			}, want{50 * 1000, true},
+			}, want{10 * 1000, true},
 		},
 		{
 			"three/delete", args{
@@ -284,62 +205,57 @@ func TestCache_BuildTime(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			ctx := context.Background()
 
 			var (
-				db    = dbfake.New()
-				cache = metricscache.New(db, slogtest.Make(t, nil), metricscache.Intervals{
-					TemplateDAUs: testutil.IntervalFast,
-				})
+				log       = testutil.Logger(t)
+				clock     = quartz.NewMock(t)
+				cache, db = newMetricsCache(t, log, clock, metricscache.Intervals{
+					TemplateBuildTimes: testutil.IntervalFast,
+				}, false)
 			)
 
-			defer cache.Close()
+			clock.Set(someDay)
 
-			template, err := db.InsertTemplate(ctx, database.InsertTemplateParams{
-				ID:          uuid.New(),
-				Provisioner: database.ProvisionerTypeEcho,
-			})
-			require.NoError(t, err)
+			org := dbgen.Organization(t, db, database.Organization{})
+			user := dbgen.User(t, db, database.User{})
 
-			templateVersion, err := db.InsertTemplateVersion(ctx, database.InsertTemplateVersionParams{
-				ID:         uuid.New(),
-				TemplateID: uuid.NullUUID{UUID: template.ID, Valid: true},
+			template := dbgen.Template(t, db, database.Template{
+				CreatedBy:      user.ID,
+				OrganizationID: org.ID,
 			})
-			require.NoError(t, err)
+
+			templateVersion := dbgen.TemplateVersion(t, db, database.TemplateVersion{
+				OrganizationID: org.ID,
+				CreatedBy:      user.ID,
+				TemplateID:     uuid.NullUUID{UUID: template.ID, Valid: true},
+			})
+
+			workspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+				OrganizationID: org.ID,
+				OwnerID:        user.ID,
+				TemplateID:     template.ID,
+			})
 
 			gotStats := cache.TemplateBuildTimeStats(template.ID)
 			requireBuildTimeStatsEmpty(t, gotStats)
 
-			for _, row := range tt.args.rows {
-				_, err := db.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
-					ID:            uuid.New(),
-					Provisioner:   database.ProvisionerTypeEcho,
-					StorageMethod: database.ProvisionerStorageMethodFile,
-					Type:          database.ProvisionerJobTypeWorkspaceBuild,
+			for buildNumber, row := range tt.args.rows {
+				job := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+					OrganizationID: org.ID,
+					InitiatorID:    user.ID,
+					Type:           database.ProvisionerJobTypeWorkspaceBuild,
+					StartedAt:      sql.NullTime{Time: row.startedAt, Valid: true},
+					CompletedAt:    sql.NullTime{Time: row.completedAt, Valid: true},
 				})
-				require.NoError(t, err)
 
-				job, err := db.AcquireProvisionerJob(ctx, database.AcquireProvisionerJobParams{
-					StartedAt: sql.NullTime{Time: row.startedAt, Valid: true},
-					Types: []database.ProvisionerType{
-						database.ProvisionerTypeEcho,
-					},
-				})
-				require.NoError(t, err)
-
-				_, err = db.InsertWorkspaceBuild(ctx, database.InsertWorkspaceBuildParams{
+				dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+					BuildNumber:       int32(1 + buildNumber), // nolint:gosec
+					WorkspaceID:       workspace.ID,
+					InitiatorID:       user.ID,
 					TemplateVersionID: templateVersion.ID,
 					JobID:             job.ID,
 					Transition:        tt.args.transition,
-					Reason:            database.BuildReasonInitiator,
 				})
-				require.NoError(t, err)
-
-				err = db.UpdateProvisionerJobWithCompleteByID(ctx, database.UpdateProvisionerJobWithCompleteByIDParams{
-					ID:          job.ID,
-					CompletedAt: sql.NullTime{Time: row.completedAt, Valid: true},
-				})
-				require.NoError(t, err)
 			}
 
 			if tt.want.loads {
@@ -377,19 +293,35 @@ func TestCache_BuildTime(t *testing.T) {
 
 func TestCache_DeploymentStats(t *testing.T) {
 	t.Parallel()
-	db := dbfake.New()
-	cache := metricscache.New(db, slogtest.Make(t, nil), metricscache.Intervals{
-		DeploymentStats: testutil.IntervalFast,
-	})
 
-	_, err := db.InsertWorkspaceAgentStat(context.Background(), database.InsertWorkspaceAgentStatParams{
-		ID:                 uuid.New(),
-		AgentID:            uuid.New(),
-		CreatedAt:          database.Now(),
-		ConnectionCount:    1,
-		RxBytes:            1,
-		TxBytes:            1,
-		SessionCountVSCode: 1,
+	var (
+		log       = testutil.Logger(t)
+		clock     = quartz.NewMock(t)
+		cache, db = newMetricsCache(t, log, clock, metricscache.Intervals{
+			DeploymentStats: testutil.IntervalFast,
+		}, false)
+	)
+
+	err := db.InsertWorkspaceAgentStats(context.Background(), database.InsertWorkspaceAgentStatsParams{
+		ID:                 []uuid.UUID{uuid.New()},
+		CreatedAt:          []time.Time{clock.Now()},
+		WorkspaceID:        []uuid.UUID{uuid.New()},
+		UserID:             []uuid.UUID{uuid.New()},
+		TemplateID:         []uuid.UUID{uuid.New()},
+		AgentID:            []uuid.UUID{uuid.New()},
+		ConnectionsByProto: json.RawMessage(`[{}]`),
+
+		RxPackets:                   []int64{0},
+		RxBytes:                     []int64{1},
+		TxPackets:                   []int64{0},
+		TxBytes:                     []int64{1},
+		ConnectionCount:             []int64{1},
+		SessionCountVSCode:          []int64{1},
+		SessionCountJetBrains:       []int64{0},
+		SessionCountReconnectingPTY: []int64{0},
+		SessionCountSSH:             []int64{0},
+		ConnectionMedianLatencyMS:   []float64{10},
+		Usage:                       []bool{false},
 	})
 	require.NoError(t, err)
 

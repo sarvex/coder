@@ -5,76 +5,36 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/coderd/parameter"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/pretty"
+	"github.com/coder/serpent"
 )
 
-func ParameterSchema(inv *clibase.Invocation, parameterSchema codersdk.ParameterSchema) (string, error) {
-	_, _ = fmt.Fprintln(inv.Stdout, Styles.Bold.Render("var."+parameterSchema.Name))
-	if parameterSchema.Description != "" {
-		_, _ = fmt.Fprintln(inv.Stdout, "  "+strings.TrimSpace(strings.Join(strings.Split(parameterSchema.Description, "\n"), "\n  "))+"\n")
-	}
-
-	var err error
-	var options []string
-	if parameterSchema.ValidationCondition != "" {
-		options, _, err = parameter.Contains(parameterSchema.ValidationCondition)
-		if err != nil {
-			return "", err
-		}
-	}
-	var value string
-	if len(options) > 0 {
-		// Move the cursor up a single line for nicer display!
-		_, _ = fmt.Fprint(inv.Stdout, "\033[1A")
-		value, err = Select(inv, SelectOptions{
-			Options:    options,
-			Default:    parameterSchema.DefaultSourceValue,
-			HideSearch: true,
-		})
-		if err == nil {
-			_, _ = fmt.Fprintln(inv.Stdout)
-			_, _ = fmt.Fprintln(inv.Stdout, "  "+Styles.Prompt.String()+Styles.Field.Render(value))
-		}
-	} else {
-		text := "Enter a value"
-		if parameterSchema.DefaultSourceValue != "" {
-			text += fmt.Sprintf(" (default: %q)", parameterSchema.DefaultSourceValue)
-		}
-		text += ":"
-
-		value, err = Prompt(inv, PromptOptions{
-			Text: Styles.Bold.Render(text),
-		})
-		value = strings.TrimSpace(value)
-	}
-	if err != nil {
-		return "", err
-	}
-
-	// If they didn't specify anything, use the default value if set.
-	if len(options) == 0 && value == "" {
-		value = parameterSchema.DefaultSourceValue
-	}
-
-	return value, nil
-}
-
-func RichParameter(inv *clibase.Invocation, templateVersionParameter codersdk.TemplateVersionParameter) (string, error) {
+func RichParameter(inv *serpent.Invocation, templateVersionParameter codersdk.TemplateVersionParameter, defaultOverrides map[string]string) (string, error) {
 	label := templateVersionParameter.Name
 	if templateVersionParameter.DisplayName != "" {
 		label = templateVersionParameter.DisplayName
 	}
 
-	_, _ = fmt.Fprintln(inv.Stdout, Styles.Bold.Render(label))
+	if templateVersionParameter.Ephemeral {
+		label += pretty.Sprint(DefaultStyles.Warn, " (build option)")
+	}
+
+	_, _ = fmt.Fprintln(inv.Stdout, Bold(label))
+
 	if templateVersionParameter.DescriptionPlaintext != "" {
 		_, _ = fmt.Fprintln(inv.Stdout, "  "+strings.TrimSpace(strings.Join(strings.Split(templateVersionParameter.DescriptionPlaintext, "\n"), "\n  "))+"\n")
 	}
 
+	defaultValue := templateVersionParameter.DefaultValue
+	if v, ok := defaultOverrides[templateVersionParameter.Name]; ok {
+		defaultValue = v
+	}
+
 	var err error
 	var value string
-	if templateVersionParameter.Type == "list(string)" {
+	switch {
+	case templateVersionParameter.Type == "list(string)":
 		// Move the cursor up a single line for nicer display!
 		_, _ = fmt.Fprint(inv.Stdout, "\033[1A")
 
@@ -84,7 +44,10 @@ func RichParameter(inv *clibase.Invocation, templateVersionParameter codersdk.Te
 			return "", err
 		}
 
-		values, err := MultiSelect(inv, options)
+		values, err := MultiSelect(inv, MultiSelectOptions{
+			Options:  options,
+			Defaults: options,
+		})
 		if err == nil {
 			v, err := json.Marshal(&values)
 			if err != nil {
@@ -92,32 +55,35 @@ func RichParameter(inv *clibase.Invocation, templateVersionParameter codersdk.Te
 			}
 
 			_, _ = fmt.Fprintln(inv.Stdout)
-			_, _ = fmt.Fprintln(inv.Stdout, "  "+Styles.Prompt.String()+Styles.Field.Render(strings.Join(values, ", ")))
+			pretty.Fprintf(
+				inv.Stdout,
+				DefaultStyles.Prompt, "%s\n", strings.Join(values, ", "),
+			)
 			value = string(v)
 		}
-	} else if len(templateVersionParameter.Options) > 0 {
+	case len(templateVersionParameter.Options) > 0:
 		// Move the cursor up a single line for nicer display!
 		_, _ = fmt.Fprint(inv.Stdout, "\033[1A")
 		var richParameterOption *codersdk.TemplateVersionParameterOption
 		richParameterOption, err = RichSelect(inv, RichSelectOptions{
 			Options:    templateVersionParameter.Options,
-			Default:    templateVersionParameter.DefaultValue,
+			Default:    defaultValue,
 			HideSearch: true,
 		})
 		if err == nil {
 			_, _ = fmt.Fprintln(inv.Stdout)
-			_, _ = fmt.Fprintln(inv.Stdout, "  "+Styles.Prompt.String()+Styles.Field.Render(richParameterOption.Name))
+			pretty.Fprintf(inv.Stdout, DefaultStyles.Prompt, "%s\n", richParameterOption.Name)
 			value = richParameterOption.Value
 		}
-	} else {
+	default:
 		text := "Enter a value"
 		if !templateVersionParameter.Required {
-			text += fmt.Sprintf(" (default: %q)", templateVersionParameter.DefaultValue)
+			text += fmt.Sprintf(" (default: %q)", defaultValue)
 		}
 		text += ":"
 
 		value, err = Prompt(inv, PromptOptions{
-			Text: Styles.Bold.Render(text),
+			Text: Bold(text),
 			Validate: func(value string) error {
 				return validateRichPrompt(value, templateVersionParameter)
 			},
@@ -130,7 +96,7 @@ func RichParameter(inv *clibase.Invocation, templateVersionParameter codersdk.Te
 
 	// If they didn't specify anything, use the default value if set.
 	if len(templateVersionParameter.Options) == 0 && value == "" {
-		value = templateVersionParameter.DefaultValue
+		value = defaultValue
 	}
 
 	return value, nil

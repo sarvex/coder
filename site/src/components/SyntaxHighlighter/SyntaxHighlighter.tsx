@@ -1,50 +1,60 @@
-import { FC } from "react"
-import Editor, { DiffEditor, loader } from "@monaco-editor/react"
-import * as monaco from "monaco-editor"
-import { useCoderTheme } from "./coderTheme"
-import { makeStyles } from "@mui/styles"
+import { useTheme } from "@emotion/react";
+import Editor, { DiffEditor, loader } from "@monaco-editor/react";
+import * as monaco from "monaco-editor";
+import type { ComponentProps, FC } from "react";
+import { useCoderTheme } from "./coderTheme";
 
-loader.config({ monaco })
+loader.config({ monaco });
 
-export const SyntaxHighlighter: FC<{
-  value: string
-  language: string
-  compareWith?: string
-}> = ({ value, compareWith, language }) => {
-  const styles = useStyles()
-  const hasDiff = compareWith && value !== compareWith
-  const coderTheme = useCoderTheme()
-  const commonProps = {
-    language,
-    theme: coderTheme.name,
-    height: 560,
-    options: {
-      minimap: {
-        enabled: false,
-      },
-      renderSideBySide: true,
-      readOnly: true,
-    },
-  }
-
-  if (coderTheme.isLoading) {
-    return null
-  }
-
-  return (
-    <div className={styles.wrapper}>
-      {hasDiff ? (
-        <DiffEditor original={compareWith} modified={value} {...commonProps} />
-      ) : (
-        <Editor value={value} {...commonProps} />
-      )}
-    </div>
-  )
+interface SyntaxHighlighterProps {
+	value: string;
+	language?: string;
+	editorProps?: ComponentProps<typeof Editor> &
+		ComponentProps<typeof DiffEditor>;
+	compareWith?: string;
 }
 
-const useStyles = makeStyles((theme) => ({
-  wrapper: {
-    padding: theme.spacing(1, 0),
-    background: theme.palette.background.paper,
-  },
-}))
+export const SyntaxHighlighter: FC<SyntaxHighlighterProps> = ({
+	value,
+	compareWith,
+	language,
+	editorProps,
+}) => {
+	const hasDiff = compareWith && value !== compareWith;
+	const theme = useTheme();
+	const coderTheme = useCoderTheme();
+	const commonProps = {
+		language,
+		theme: coderTheme.name,
+		height: 560,
+		options: {
+			minimap: {
+				enabled: false,
+			},
+			renderSideBySide: true,
+			readOnly: true,
+		},
+		...editorProps,
+	};
+
+	if (coderTheme.isLoading) {
+		return null;
+	}
+
+	return (
+		<div
+			data-chromatic="ignore"
+			css={{
+				padding: "8px 0",
+				height: "100%",
+				backgroundColor: theme.monaco.colors["editor.background"],
+			}}
+		>
+			{hasDiff ? (
+				<DiffEditor original={compareWith} modified={value} {...commonProps} />
+			) : (
+				<Editor value={value} {...commonProps} />
+			)}
+		</div>
+	);
+};

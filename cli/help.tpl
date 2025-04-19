@@ -1,20 +1,22 @@
-{{- /* Heavily inspired by the Go toolchain formatting. */ -}}
-Usage: {{.FullUsage}}
+{{- /* Heavily inspired by the Go toolchain and fd */ -}}
+coder {{version}}
+
+{{prettyHeader "Usage"}}
+{{indent .FullUsage 2}}
 
 
 {{ with .Short }}
-{{- wrapTTY . }}
+{{- indent . 2 | wrapTTY }}
 {{"\n"}}
 {{- end}}
 
 {{ with .Aliases }}
-{{ "\n" }}
-{{ "Aliases:"}} {{ joinStrings .}}
-{{ "\n" }}
+{{"  Aliases: "}} {{- joinStrings .}}
 {{- end }}
 
 {{- with .Long}}
-{{- formatLong . }}
+{{"\n"}}
+{{- indent . 2}}
 {{ "\n" }}
 {{- end }}
 {{ with visibleChildren . }}
@@ -34,20 +36,20 @@ Usage: {{.FullUsage}}
 {{- else }}
 {{- end }}
     {{- range $index, $option := $group.Options }}
-	{{- if not (eq $option.FlagShorthand "") }}{{- print "\n  -" $option.FlagShorthand ", " -}}
+	{{- if not (eq $option.FlagShorthand "") }}{{- print "\n "}} {{ keyword "-"}}{{keyword $option.FlagShorthand }}{{", "}}
 	{{- else }}{{- print "\n      " -}}
 	{{- end }}
-    {{- with flagName $option }}--{{ . }}{{ end }} {{- with typeHelper $option }} {{ . }}{{ end }}
-    {{- with envName $option }}, ${{ . }}{{ end }}
+    {{- with flagName $option }}{{keyword "--"}}{{ keyword . }}{{ end }} {{- with typeHelper $option }} {{ . }}{{ end }}
+    {{- with envName $option }}, {{ print "$" . | keyword }}{{ end }}
     {{- with $option.Default }} (default: {{ . }}){{ end }}
         {{- with $option.Description }}
             {{- $desc := $option.Description }}
 {{ indent $desc 10 }}
-{{- if isDeprecated $option }} DEPRECATED {{ end }}
+{{- if isDeprecated $option }}{{ indent (printf "DEPRECATED: Use %s instead." (useInstead $option)) 10 }}{{ end }}
         {{- end -}}
     {{- end }}
 {{- end }}
----
+———
 {{- if .Parent }}
 Run `coder --help` for a list of global options.
 {{- else }}

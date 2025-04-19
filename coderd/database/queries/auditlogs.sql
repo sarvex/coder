@@ -2,13 +2,24 @@
 -- ID.
 -- name: GetAuditLogsOffset :many
 SELECT
-    audit_logs.*,
+    sqlc.embed(audit_logs),
+    -- sqlc.embed(users) would be nice but it does not seem to play well with
+    -- left joins.
     users.username AS user_username,
+    users.name AS user_name,
     users.email AS user_email,
     users.created_at AS user_created_at,
+    users.updated_at AS user_updated_at,
+    users.last_seen_at AS user_last_seen_at,
     users.status AS user_status,
+    users.login_type AS user_login_type,
     users.rbac_roles AS user_roles,
     users.avatar_url AS user_avatar_url,
+    users.deleted AS user_deleted,
+    users.quiet_hours_schedule AS user_quiet_hours_schedule,
+    COALESCE(organizations.name, '') AS organization_name,
+    COALESCE(organizations.display_name, '') AS organization_display_name,
+    COALESCE(organizations.icon, '') AS organization_icon,
     COUNT(audit_logs.*) OVER () AS count
 FROM
     audit_logs
@@ -37,6 +48,7 @@ FROM
 				workspaces.id = workspace_builds.workspace_id AND
 				workspace_builds.build_number = 1
 			)
+		LEFT JOIN organizations ON audit_logs.organization_id = organizations.id
 WHERE
     -- Filter resource_type
 	CASE
@@ -48,6 +60,12 @@ WHERE
 	AND CASE
 		WHEN @resource_id :: uuid != '00000000-0000-0000-0000-000000000000'::uuid THEN
 			resource_id = @resource_id
+		ELSE true
+	END
+  	-- Filter organization_id
+  	AND CASE
+		WHEN @organization_id :: uuid != '00000000-0000-0000-0000-000000000000'::uuid THEN
+			audit_logs.organization_id = @organization_id
 		ELSE true
 	END
 	-- Filter by resource_target
@@ -62,10 +80,16 @@ WHERE
 			action = @action :: audit_action
 		ELSE true
 	END
+	-- Filter by user_id
+	AND CASE
+		WHEN @user_id :: uuid != '00000000-0000-0000-0000-000000000000'::uuid THEN
+			user_id = @user_id
+		ELSE true
+	END
 	-- Filter by username
 	AND CASE
 		WHEN @username :: text != '' THEN
-			users.username = @username
+			user_id = (SELECT id FROM users WHERE lower(username) = lower(@username) AND deleted = false)
 		ELSE true
 	END
 	-- Filter by user_email
@@ -92,12 +116,24 @@ WHERE
             workspace_builds.reason::text = @build_reason
         ELSE true
     END
+	-- Filter request_id
+	AND CASE
+		WHEN @request_id :: uuid != '00000000-0000-0000-0000-000000000000'::uuid THEN
+			audit_logs.request_id = @request_id
+		ELSE true
+	END
+
+	-- Authorize Filter clause will be injected below in GetAuthorizedAuditLogsOffset
+	-- @authorize_filter
 ORDER BY
     "time" DESC
 LIMIT
-    $1
+	-- a limit of 0 means "no limit". The audit log table is unbounded
+	-- in size, and is expected to be quite large. Implement a default
+	-- limit of 100 to prevent accidental excessively large queries.
+	COALESCE(NULLIF(@limit_opt :: int, 0), 100)
 OFFSET
-    $2;
+    @offset_opt;
 
 -- name: InsertAuditLog :one
 INSERT INTO

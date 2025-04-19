@@ -1,14 +1,19 @@
-Usage: coder users list [flags]
+coder v0.0.0-devel
 
-Aliases: ls
+USAGE:
+  coder users list [flags]
 
-[1mOptions[0m
-  -c, --column string-array (default: username,email,created_at,status)
-          Columns to display in table output. Available columns: id, username,
-          email, created at, status.
+  Aliases: ls
 
-  -o, --output string (default: table)
-          Output format. Available formats: table, json.
+OPTIONS:
+  -c, --column [id|username|email|created at|updated at|status] (default: username,email,created at,status)
+          Columns to display in table output.
 
----
+      --github-user-id int
+          Filter users by their GitHub user ID.
+
+  -o, --output table|json (default: table)
+          Output format.
+
+———
 Run `coder --help` for a list of global options.

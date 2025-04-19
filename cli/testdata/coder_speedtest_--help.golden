@@ -1,8 +1,14 @@
-Usage: coder speedtest [flags] <workspace>
+coder v0.0.0-devel
 
-Run upload and download tests from your machine to a workspace
+USAGE:
+  coder speedtest [flags] <workspace>
 
-[1mOptions[0m
+  Run upload and download tests from your machine to a workspace
+
+OPTIONS:
+  -c, --column [Interval|Throughput] (default: Interval,Throughput)
+          Columns to display in table output.
+
   -d, --direct bool
           Specifies whether to wait for a direct connection before testing
           speed.
@@ -11,8 +17,14 @@ Run upload and download tests from your machine to a workspace
           Specifies whether to run in reverse mode where the client receives and
           the server sends.
 
+  -o, --output table|json (default: table)
+          Output format.
+
+      --pcap-file string
+          Specifies a file to write a network capture to.
+
   -t, --time duration (default: 5s)
           Specifies the duration to monitor traffic.
 
----
+———
 Run `coder --help` for a list of global options.

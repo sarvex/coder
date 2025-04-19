@@ -7,30 +7,33 @@ import (
 	"net/url"
 	"time"
 
-	"golang.org/x/xerrors"
+	"github.com/coder/coder/v2/coderd/healthcheck/health"
+	"github.com/coder/coder/v2/codersdk/healthsdk"
 )
 
-type AccessURLReport struct {
-	Healthy         bool
-	Reachable       bool
-	StatusCode      int
-	HealthzResponse string
-	Error           error
-}
+type AccessURLReport healthsdk.AccessURLReport
 
-type AccessURLOptions struct {
+type AccessURLReportOptions struct {
 	AccessURL *url.URL
 	Client    *http.Client
+
+	Dismissed bool
 }
 
-func (r *AccessURLReport) Run(ctx context.Context, opts *AccessURLOptions) {
+func (r *AccessURLReport) Run(ctx context.Context, opts *AccessURLReportOptions) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	r.Severity = health.SeverityOK
+	r.Warnings = []health.Message{}
+	r.Dismissed = opts.Dismissed
+
 	if opts.AccessURL == nil {
-		r.Error = xerrors.New("access URL is nil")
+		r.Error = health.Errorf(health.CodeAccessURLNotSet, "Access URL not set")
+		r.Severity = health.SeverityError
 		return
 	}
+	r.AccessURL = opts.AccessURL.String()
 
 	if opts.Client == nil {
 		opts.Client = http.DefaultClient
@@ -38,31 +41,39 @@ func (r *AccessURLReport) Run(ctx context.Context, opts *AccessURLOptions) {
 
 	accessURL, err := opts.AccessURL.Parse("/healthz")
 	if err != nil {
-		r.Error = xerrors.Errorf("parse healthz endpoint: %w", err)
+		r.Error = health.Errorf(health.CodeAccessURLInvalid, "parse healthz endpoint: %s", err)
+		r.Severity = health.SeverityError
 		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", accessURL.String(), nil)
 	if err != nil {
-		r.Error = xerrors.Errorf("create healthz request: %w", err)
+		r.Error = health.Errorf(health.CodeAccessURLFetch, "create healthz request: %s", err)
+		r.Severity = health.SeverityError
 		return
 	}
 
 	res, err := opts.Client.Do(req)
 	if err != nil {
-		r.Error = xerrors.Errorf("get healthz endpoint: %w", err)
+		r.Error = health.Errorf(health.CodeAccessURLFetch, "get healthz endpoint: %s", err)
+		r.Severity = health.SeverityError
 		return
 	}
 	defer res.Body.Close()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		r.Error = xerrors.Errorf("read healthz response: %w", err)
+		r.Error = health.Errorf(health.CodeAccessURLFetch, "read healthz response: %s", err)
+		r.Severity = health.SeverityError
 		return
 	}
 
 	r.Reachable = true
 	r.Healthy = res.StatusCode == http.StatusOK
 	r.StatusCode = res.StatusCode
+	if res.StatusCode != http.StatusOK {
+		r.Severity = health.SeverityWarning
+		r.Warnings = append(r.Warnings, health.Messagef(health.CodeAccessURLNotOK, "/healthz did not return 200 OK"))
+	}
 	r.HealthzResponse = string(body)
 }

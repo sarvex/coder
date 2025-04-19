@@ -4,7 +4,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/codersdk"
 )
 
 type Config struct {
@@ -19,6 +19,9 @@ type Config struct {
 	// NoWaitForAgents determines whether the test should wait for the workspace
 	// agents to connect before returning.
 	NoWaitForAgents bool `json:"no_wait_for_agents"`
+	// Retry determines how many times to retry starting a workspace build if it
+	// fails.
+	Retry int `json:"retry"`
 }
 
 func (c Config) Validate() error {

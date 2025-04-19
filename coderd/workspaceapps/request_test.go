@@ -6,7 +6,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/coderd/workspaceapps"
+	"github.com/coder/coder/v2/coderd/workspaceapps"
 )
 
 func Test_RequestValidate(t *testing.T) {
@@ -15,6 +15,7 @@ func Test_RequestValidate(t *testing.T) {
 	cases := []struct {
 		name        string
 		req         workspaceapps.Request
+		noNormalize bool
 		errContains string
 	}{
 		{
@@ -57,6 +58,26 @@ func Test_RequestValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "OK5",
+			req: workspaceapps.Request{
+				AccessMethod:      workspaceapps.AccessMethodSubdomain,
+				BasePath:          "/",
+				UsernameOrID:      "foo",
+				WorkspaceNameOrID: "bar",
+				AppSlugOrPort:     "8080",
+			},
+		},
+		{
+			name: "OK6",
+			req: workspaceapps.Request{
+				AccessMethod:      workspaceapps.AccessMethodSubdomain,
+				BasePath:          "/",
+				UsernameOrID:      "foo",
+				WorkspaceNameOrID: "bar",
+				AppSlugOrPort:     "8080s",
+			},
+		},
+		{
 			name: "NoAccessMethod",
 			req: workspaceapps.Request{
 				AccessMethod:      "",
@@ -90,6 +111,7 @@ func Test_RequestValidate(t *testing.T) {
 				AgentNameOrID:     "baz",
 				AppSlugOrPort:     "qux",
 			},
+			noNormalize: true,
 			errContains: "base path is required",
 		},
 		{
@@ -150,6 +172,44 @@ func Test_RequestValidate(t *testing.T) {
 				AppSlugOrPort:     "",
 			},
 			errContains: "app slug or port is required",
+		},
+		{
+			name: "Prefix/OK",
+			req: workspaceapps.Request{
+				AccessMethod:      workspaceapps.AccessMethodSubdomain,
+				Prefix:            "blah---",
+				BasePath:          "/",
+				UsernameOrID:      "foo",
+				WorkspaceNameOrID: "bar",
+				AgentNameOrID:     "baz",
+				AppSlugOrPort:     "qux",
+			},
+		},
+		{
+			name: "Prefix/Invalid",
+			req: workspaceapps.Request{
+				AccessMethod:      workspaceapps.AccessMethodSubdomain,
+				Prefix:            "blah", // no trailing ---
+				BasePath:          "/",
+				UsernameOrID:      "foo",
+				WorkspaceNameOrID: "bar",
+				AgentNameOrID:     "baz",
+				AppSlugOrPort:     "qux",
+			},
+			errContains: "prefix must have a trailing '---'",
+		},
+		{
+			name: "Prefix/NotAllowedPath",
+			req: workspaceapps.Request{
+				AccessMethod:      workspaceapps.AccessMethodPath,
+				Prefix:            "blah---",
+				BasePath:          "/",
+				UsernameOrID:      "foo",
+				WorkspaceNameOrID: "bar",
+				AgentNameOrID:     "baz",
+				AppSlugOrPort:     "qux",
+			},
+			errContains: "prefix is only valid for subdomain apps",
 		},
 		{
 			name: "Terminal/OtherFields/UsernameOrID",
@@ -215,8 +275,11 @@ func Test_RequestValidate(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			req := c.req.Normalize()
-			err := req.Validate()
+			req := c.req
+			if !c.noNormalize {
+				req = c.req.Normalize()
+			}
+			err := req.Check()
 			if c.errContains == "" {
 				require.NoError(t, err)
 			} else {
@@ -226,6 +289,3 @@ func Test_RequestValidate(t *testing.T) {
 		})
 	}
 }
-
-// getDatabase is tested heavily in auth_test.go, so we don't have specific
-// tests for it here.

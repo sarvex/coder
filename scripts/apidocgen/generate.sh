@@ -27,12 +27,11 @@ go run github.com/swaggo/swag/cmd/swag@v1.8.9 init \
 popd
 
 pushd "${APIDOCGEN_DIR}"
-yarn
 
 # Make sure that widdershins is installed correctly.
-yarn exec -- widdershins --version
+pnpm exec -- widdershins --version
 # Render the Markdown file.
-yarn exec -- widdershins \
+pnpm exec -- widdershins \
 	--user_templates "./markdown-template" \
 	--search false \
 	--omitHeader true \

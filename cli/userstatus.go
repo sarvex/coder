@@ -6,13 +6,15 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/cliui"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/pretty"
+
+	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/serpent"
 )
 
 // createUserStatusCommand sets a user status.
-func (r *RootCmd) createUserStatusCommand(sdkStatus codersdk.UserStatus) *clibase.Cmd {
+func (r *RootCmd) createUserStatusCommand(sdkStatus codersdk.UserStatus) *serpent.Command {
 	var verb string
 	var pastVerb string
 	var aliases []string
@@ -26,7 +28,6 @@ func (r *RootCmd) createUserStatusCommand(sdkStatus codersdk.UserStatus) *clibas
 	case codersdk.UserStatusSuspended:
 		verb = "suspend"
 		pastVerb = "suspended"
-		aliases = []string{"rm", "delete"}
 		short = "Update a user's status to 'suspended'. A suspended user cannot log into the platform"
 	default:
 		panic(fmt.Sprintf("%s is not supported", sdkStatus))
@@ -35,20 +36,21 @@ func (r *RootCmd) createUserStatusCommand(sdkStatus codersdk.UserStatus) *clibas
 	client := new(codersdk.Client)
 
 	var columns []string
-	cmd := &clibase.Cmd{
+	allColumns := []string{"username", "email", "created at", "status"}
+	cmd := &serpent.Command{
 		Use:     fmt.Sprintf("%s <username|user_id>", verb),
 		Short:   short,
 		Aliases: aliases,
-		Long: formatExamples(
-			example{
+		Long: FormatExamples(
+			Example{
 				Command: fmt.Sprintf("coder users %s example_user", verb),
 			},
 		),
-		Middleware: clibase.Chain(
-			clibase.RequireNArgs(1),
+		Middleware: serpent.Chain(
+			serpent.RequireNArgs(1),
 			r.InitClient(client),
 		),
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			identifier := inv.Args[0]
 			if identifier == "" {
 				return xerrors.Errorf("user identifier cannot be an empty string")
@@ -89,17 +91,17 @@ func (r *RootCmd) createUserStatusCommand(sdkStatus codersdk.UserStatus) *clibas
 				return xerrors.Errorf("%s user: %w", verb, err)
 			}
 
-			_, _ = fmt.Fprintf(inv.Stdout, "\nUser %s has been %s!\n", cliui.Styles.Keyword.Render(user.Username), pastVerb)
+			_, _ = fmt.Fprintf(inv.Stdout, "\nUser %s has been %s!\n", pretty.Sprint(cliui.DefaultStyles.Keyword, user.Username), pastVerb)
 			return nil
 		},
 	}
-	cmd.Options = clibase.OptionSet{
+	cmd.Options = serpent.OptionSet{
 		{
 			Flag:          "column",
 			FlagShorthand: "c",
 			Description:   "Specify a column to filter in the table.",
-			Default:       strings.Join([]string{"username", "email", "created_at", "status"}, ","),
-			Value:         clibase.StringArrayOf(&columns),
+			Default:       strings.Join(allColumns, ","),
+			Value:         serpent.EnumArrayOf(&columns, allColumns...),
 		},
 	}
 	return cmd

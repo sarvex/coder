@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -13,17 +12,38 @@ import (
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
+	"github.com/google/uuid"
+	"github.com/hashicorp/yamux"
 	"golang.org/x/xerrors"
-	"nhooyr.io/websocket"
+	"storj.io/drpc"
 	"tailscale.com/tailcfg"
 
-	"github.com/coder/retry"
-
 	"cdr.dev/slog"
+	"github.com/coder/coder/v2/agent/proto"
+	"github.com/coder/coder/v2/apiversion"
+	"github.com/coder/coder/v2/codersdk"
+	drpcsdk "github.com/coder/coder/v2/codersdk/drpc"
+	tailnetproto "github.com/coder/coder/v2/tailnet/proto"
+	"github.com/coder/websocket"
+)
 
-	"github.com/google/uuid"
+// ExternalLogSourceID is the statically-defined ID of a log-source that
+// appears as "External" in the dashboard.
+//
+// This is to support legacy API-consumers that do not create their own
+// log-source. This should be removed in the future.
+var ExternalLogSourceID = uuid.MustParse("3b579bf4-1ed8-4b99-87a8-e9a1e3410410")
 
-	"github.com/coder/coder/codersdk"
+// ConnectionType is the type of connection that the agent is receiving.
+type ConnectionType string
+
+// Connection type enums.
+const (
+	ConnectionTypeUnspecified     ConnectionType = "Unspecified"
+	ConnectionTypeSSH             ConnectionType = "SSH"
+	ConnectionTypeVSCode          ConnectionType = "VS Code"
+	ConnectionTypeJetBrains       ConnectionType = "JetBrains"
+	ConnectionTypeReconnectingPTY ConnectionType = "Web Terminal"
 )
 
 // New returns a client that is used to interact with the
@@ -65,57 +85,62 @@ func (c *Client) GitSSHKey(ctx context.Context) (GitSSHKey, error) {
 	return gitSSHKey, json.NewDecoder(res.Body).Decode(&gitSSHKey)
 }
 
-// In the future, we may want to support sending back multiple values for
-// performance.
-type PostMetadataRequest = codersdk.WorkspaceAgentMetadataResult
-
-func (c *Client) PostMetadata(ctx context.Context, key string, req PostMetadataRequest) error {
-	res, err := c.SDK.Request(ctx, http.MethodPost, "/api/v2/workspaceagents/me/metadata/"+key, req)
-	if err != nil {
-		return xerrors.Errorf("execute request: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusNoContent {
-		return codersdk.ReadBodyAsError(res)
-	}
-
-	return nil
+type Metadata struct {
+	Key string `json:"key"`
+	codersdk.WorkspaceAgentMetadataResult
 }
 
+type PostMetadataRequest struct {
+	Metadata []Metadata `json:"metadata"`
+}
+
+// In the future, we may want to support sending back multiple values for
+// performance.
+type PostMetadataRequestDeprecated = codersdk.WorkspaceAgentMetadataResult
+
 type Manifest struct {
+	AgentID   uuid.UUID `json:"agent_id"`
+	AgentName string    `json:"agent_name"`
+	// OwnerName and WorkspaceID are used by an open-source user to identify the workspace.
+	// We do not provide insurance that this will not be removed in the future,
+	// but if it's easy to persist lets keep it around.
+	OwnerName     string    `json:"owner_name"`
+	WorkspaceID   uuid.UUID `json:"workspace_id"`
+	WorkspaceName string    `json:"workspace_name"`
 	// GitAuthConfigs stores the number of Git configurations
 	// the Coder deployment has. If this number is >0, we
 	// set up special configuration in the workspace.
-	GitAuthConfigs        int                                          `json:"git_auth_configs"`
-	VSCodePortProxyURI    string                                       `json:"vscode_port_proxy_uri"`
-	Apps                  []codersdk.WorkspaceApp                      `json:"apps"`
-	DERPMap               *tailcfg.DERPMap                             `json:"derpmap"`
-	EnvironmentVariables  map[string]string                            `json:"environment_variables"`
-	StartupScript         string                                       `json:"startup_script"`
-	StartupScriptTimeout  time.Duration                                `json:"startup_script_timeout"`
-	Directory             string                                       `json:"directory"`
-	MOTDFile              string                                       `json:"motd_file"`
-	ShutdownScript        string                                       `json:"shutdown_script"`
-	ShutdownScriptTimeout time.Duration                                `json:"shutdown_script_timeout"`
-	Metadata              []codersdk.WorkspaceAgentMetadataDescription `json:"metadata"`
+	GitAuthConfigs           int                                          `json:"git_auth_configs"`
+	VSCodePortProxyURI       string                                       `json:"vscode_port_proxy_uri"`
+	Apps                     []codersdk.WorkspaceApp                      `json:"apps"`
+	DERPMap                  *tailcfg.DERPMap                             `json:"derpmap"`
+	DERPForceWebSockets      bool                                         `json:"derp_force_websockets"`
+	EnvironmentVariables     map[string]string                            `json:"environment_variables"`
+	Directory                string                                       `json:"directory"`
+	MOTDFile                 string                                       `json:"motd_file"`
+	DisableDirectConnections bool                                         `json:"disable_direct_connections"`
+	Metadata                 []codersdk.WorkspaceAgentMetadataDescription `json:"metadata"`
+	Scripts                  []codersdk.WorkspaceAgentScript              `json:"scripts"`
+	Devcontainers            []codersdk.WorkspaceAgentDevcontainer        `json:"devcontainers"`
 }
 
-// Manifest fetches manifest for the currently authenticated workspace agent.
-func (c *Client) Manifest(ctx context.Context) (Manifest, error) {
-	res, err := c.SDK.Request(ctx, http.MethodGet, "/api/v2/workspaceagents/me/manifest", nil)
-	if err != nil {
-		return Manifest{}, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return Manifest{}, codersdk.ReadBodyAsError(res)
-	}
-	var agentMeta Manifest
-	err = json.NewDecoder(res.Body).Decode(&agentMeta)
-	if err != nil {
-		return Manifest{}, err
-	}
+type LogSource struct {
+	ID          uuid.UUID `json:"id"`
+	DisplayName string    `json:"display_name"`
+	Icon        string    `json:"icon"`
+}
+
+type Script struct {
+	Script string `json:"script"`
+}
+
+// RewriteDERPMap rewrites the DERP map to use the access URL of the SDK as the
+// "embedded relay" access URL. The passed derp map is modified in place.
+//
+// Agents can provide an arbitrary access URL that may be different that the
+// globally configured one. This breaks the built-in DERP, which would continue
+// to reference the global access URL.
+func (c *Client) RewriteDERPMap(derpMap *tailcfg.DERPMap) {
 	accessingPort := c.SDK.URL.Port()
 	if accessingPort == "" {
 		accessingPort = "80"
@@ -125,15 +150,11 @@ func (c *Client) Manifest(ctx context.Context) (Manifest, error) {
 	}
 	accessPort, err := strconv.Atoi(accessingPort)
 	if err != nil {
-		return Manifest{}, xerrors.Errorf("convert accessing port %q: %w", accessingPort, err)
+		// this should never happen because URL.Port() returns the empty string if the port is not
+		// valid.
+		c.SDK.Logger().Critical(context.Background(), "failed to parse URL port", slog.F("port", accessingPort))
 	}
-	// Agents can provide an arbitrary access URL that may be different
-	// that the globally configured one. This breaks the built-in DERP,
-	// which would continue to reference the global access URL.
-	//
-	// This converts all built-in DERPs to use the access URL that the
-	// manifest request was performed with.
-	for _, region := range agentMeta.DERPMap.Regions {
+	for _, region := range derpMap.Regions {
 		if !region.EmbeddedRelay {
 			continue
 		}
@@ -147,21 +168,111 @@ func (c *Client) Manifest(ctx context.Context) (Manifest, error) {
 			node.ForceHTTP = c.SDK.URL.Scheme == "http"
 		}
 	}
-	return agentMeta, nil
 }
 
-// Listen connects to the workspace agent coordinate WebSocket
-// that handles connection negotiation.
-func (c *Client) Listen(ctx context.Context) (net.Conn, error) {
-	coordinateURL, err := c.SDK.URL.Parse("/api/v2/workspaceagents/me/coordinate")
+// ConnectRPC20 returns a dRPC client to the Agent API v2.0.  Notably, it is missing
+// GetAnnouncementBanners, but is useful when you want to be maximally compatible with Coderd
+// Release Versions from 2.9+
+// Deprecated: use ConnectRPC20WithTailnet
+func (c *Client) ConnectRPC20(ctx context.Context) (proto.DRPCAgentClient20, error) {
+	conn, err := c.connectRPCVersion(ctx, apiversion.New(2, 0))
+	if err != nil {
+		return nil, err
+	}
+	return proto.NewDRPCAgentClient(conn), nil
+}
+
+// ConnectRPC20WithTailnet returns a dRPC client to the Agent API v2.0.  Notably, it is missing
+// GetAnnouncementBanners, but is useful when you want to be maximally compatible with Coderd
+// Release Versions from 2.9+
+func (c *Client) ConnectRPC20WithTailnet(ctx context.Context) (
+	proto.DRPCAgentClient20, tailnetproto.DRPCTailnetClient20, error,
+) {
+	conn, err := c.connectRPCVersion(ctx, apiversion.New(2, 0))
+	if err != nil {
+		return nil, nil, err
+	}
+	return proto.NewDRPCAgentClient(conn), tailnetproto.NewDRPCTailnetClient(conn), nil
+}
+
+// ConnectRPC21 returns a dRPC client to the Agent API v2.1.  It is useful when you want to be
+// maximally compatible with Coderd Release Versions from 2.12+
+// Deprecated: use ConnectRPC21WithTailnet
+func (c *Client) ConnectRPC21(ctx context.Context) (proto.DRPCAgentClient21, error) {
+	conn, err := c.connectRPCVersion(ctx, apiversion.New(2, 1))
+	if err != nil {
+		return nil, err
+	}
+	return proto.NewDRPCAgentClient(conn), nil
+}
+
+// ConnectRPC21WithTailnet returns a dRPC client to the Agent API v2.1.  It is useful when you want to be
+// maximally compatible with Coderd Release Versions from 2.12+
+func (c *Client) ConnectRPC21WithTailnet(ctx context.Context) (
+	proto.DRPCAgentClient21, tailnetproto.DRPCTailnetClient21, error,
+) {
+	conn, err := c.connectRPCVersion(ctx, apiversion.New(2, 1))
+	if err != nil {
+		return nil, nil, err
+	}
+	return proto.NewDRPCAgentClient(conn), tailnetproto.NewDRPCTailnetClient(conn), nil
+}
+
+// ConnectRPC22 returns a dRPC client to the Agent API v2.2.  It is useful when you want to be
+// maximally compatible with Coderd Release Versions from 2.13+
+func (c *Client) ConnectRPC22(ctx context.Context) (
+	proto.DRPCAgentClient22, tailnetproto.DRPCTailnetClient22, error,
+) {
+	conn, err := c.connectRPCVersion(ctx, apiversion.New(2, 2))
+	if err != nil {
+		return nil, nil, err
+	}
+	return proto.NewDRPCAgentClient(conn), tailnetproto.NewDRPCTailnetClient(conn), nil
+}
+
+// ConnectRPC23 returns a dRPC client to the Agent API v2.3.  It is useful when you want to be
+// maximally compatible with Coderd Release Versions from 2.18+
+func (c *Client) ConnectRPC23(ctx context.Context) (
+	proto.DRPCAgentClient23, tailnetproto.DRPCTailnetClient23, error,
+) {
+	conn, err := c.connectRPCVersion(ctx, apiversion.New(2, 3))
+	if err != nil {
+		return nil, nil, err
+	}
+	return proto.NewDRPCAgentClient(conn), tailnetproto.NewDRPCTailnetClient(conn), nil
+}
+
+// ConnectRPC24 returns a dRPC client to the Agent API v2.4.  It is useful when you want to be
+// maximally compatible with Coderd Release Versions from 2.xx+ // TODO @vincent: define version
+func (c *Client) ConnectRPC24(ctx context.Context) (
+	proto.DRPCAgentClient24, tailnetproto.DRPCTailnetClient24, error,
+) {
+	conn, err := c.connectRPCVersion(ctx, apiversion.New(2, 4))
+	if err != nil {
+		return nil, nil, err
+	}
+	return proto.NewDRPCAgentClient(conn), tailnetproto.NewDRPCTailnetClient(conn), nil
+}
+
+// ConnectRPC connects to the workspace agent API and tailnet API
+func (c *Client) ConnectRPC(ctx context.Context) (drpc.Conn, error) {
+	return c.connectRPCVersion(ctx, proto.CurrentVersion)
+}
+
+func (c *Client) connectRPCVersion(ctx context.Context, version *apiversion.APIVersion) (drpc.Conn, error) {
+	rpcURL, err := c.SDK.URL.Parse("/api/v2/workspaceagents/me/rpc")
 	if err != nil {
 		return nil, xerrors.Errorf("parse url: %w", err)
 	}
+	q := rpcURL.Query()
+	q.Add("version", version.String())
+	rpcURL.RawQuery = q.Encode()
+
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, xerrors.Errorf("create cookie jar: %w", err)
 	}
-	jar.SetCookies(coordinateURL, []*http.Cookie{{
+	jar.SetCookies(rpcURL, []*http.Cookie{{
 		Name:  codersdk.SessionTokenCookie,
 		Value: c.SDK.SessionToken(),
 	}})
@@ -170,7 +281,7 @@ func (c *Client) Listen(ctx context.Context) (net.Conn, error) {
 		Transport: c.SDK.HTTPClient.Transport,
 	}
 	// nolint:bodyclose
-	conn, res, err := websocket.Dial(ctx, coordinateURL.String(), &websocket.DialOptions{
+	conn, res, err := websocket.Dial(ctx, rpcURL.String(), &websocket.DialOptions{
 		HTTPClient: httpClient,
 	})
 	if err != nil {
@@ -180,54 +291,19 @@ func (c *Client) Listen(ctx context.Context) (net.Conn, error) {
 		return nil, codersdk.ReadBodyAsError(res)
 	}
 
-	ctx, cancelFunc := context.WithCancel(ctx)
-	ctx, wsNetConn := websocketNetConn(ctx, conn, websocket.MessageBinary)
+	// Set the read limit to 4 MiB -- about the limit for protobufs.  This needs to be larger than
+	// the default because some of our protocols can include large messages like startup scripts.
+	conn.SetReadLimit(1 << 22)
+	netConn := websocket.NetConn(ctx, conn, websocket.MessageBinary)
 
-	// Ping once every 30 seconds to ensure that the websocket is alive. If we
-	// don't get a response within 30s we kill the websocket and reconnect.
-	// See: https://github.com/coder/coder/pull/5824
-	closed := make(chan struct{})
-	go func() {
-		defer close(closed)
-		tick := 30 * time.Second
-		ticker := time.NewTicker(tick)
-		defer ticker.Stop()
-		defer func() {
-			c.SDK.Logger.Debug(ctx, "coordinate pinger exited")
-		}()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case start := <-ticker.C:
-				ctx, cancel := context.WithTimeout(ctx, tick)
-
-				err := conn.Ping(ctx)
-				if err != nil {
-					c.SDK.Logger.Error(ctx, "workspace agent coordinate ping", slog.Error(err))
-
-					err := conn.Close(websocket.StatusGoingAway, "Ping failed")
-					if err != nil {
-						c.SDK.Logger.Error(ctx, "close workspace agent coordinate websocket", slog.Error(err))
-					}
-
-					cancel()
-					return
-				}
-
-				c.SDK.Logger.Debug(ctx, "got coordinate pong", slog.F("took", time.Since(start)))
-				cancel()
-			}
-		}
-	}()
-
-	return &closeNetConn{
-		Conn: wsNetConn,
-		closeFunc: func() {
-			cancelFunc()
-			<-closed
-		},
-	}, nil
+	config := yamux.DefaultConfig()
+	config.LogOutput = nil
+	config.Logger = slog.Stdlib(ctx, c.SDK.Logger(), slog.LevelInfo)
+	session, err := yamux.Client(netConn, config)
+	if err != nil {
+		return nil, xerrors.Errorf("multiplex client: %w", err)
+	}
+	return drpcsdk.MultiplexedConn(session), nil
 }
 
 type PostAppHealthsRequest struct {
@@ -235,18 +311,23 @@ type PostAppHealthsRequest struct {
 	Healths map[uuid.UUID]codersdk.WorkspaceAppHealth
 }
 
-// PostAppHealth updates the workspace agent app health status.
-func (c *Client) PostAppHealth(ctx context.Context, req PostAppHealthsRequest) error {
-	res, err := c.SDK.Request(ctx, http.MethodPost, "/api/v2/workspaceagents/me/app-health", req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return codersdk.ReadBodyAsError(res)
-	}
+// BatchUpdateAppHealthsClient is a partial interface of proto.DRPCAgentClient.
+type BatchUpdateAppHealthsClient interface {
+	BatchUpdateAppHealths(ctx context.Context, req *proto.BatchUpdateAppHealthRequest) (*proto.BatchUpdateAppHealthResponse, error)
+}
 
-	return nil
+func AppHealthPoster(aAPI BatchUpdateAppHealthsClient) func(ctx context.Context, req PostAppHealthsRequest) error {
+	return func(ctx context.Context, req PostAppHealthsRequest) error {
+		pReq, err := ProtoFromAppHealthsRequest(req)
+		if err != nil {
+			return xerrors.Errorf("convert AppHealthsRequest: %w", err)
+		}
+		_, err = aAPI.BatchUpdateAppHealths(ctx, pReq)
+		if err != nil {
+			return xerrors.Errorf("batch update app healths: %w", err)
+		}
+		return nil
+	}
 }
 
 // AuthenticateResponse is returned when an instance ID
@@ -398,61 +479,6 @@ func (c *Client) AuthAzureInstanceIdentity(ctx context.Context) (AuthenticateRes
 	return resp, json.NewDecoder(res.Body).Decode(&resp)
 }
 
-// ReportStats begins a stat streaming connection with the Coder server.
-// It is resilient to network failures and intermittent coderd issues.
-func (c *Client) ReportStats(ctx context.Context, log slog.Logger, statsChan <-chan *Stats, setInterval func(time.Duration)) (io.Closer, error) {
-	var interval time.Duration
-	ctx, cancel := context.WithCancel(ctx)
-	exited := make(chan struct{})
-
-	postStat := func(stat *Stats) {
-		var nextInterval time.Duration
-		for r := retry.New(100*time.Millisecond, time.Minute); r.Wait(ctx); {
-			resp, err := c.PostStats(ctx, stat)
-			if err != nil {
-				if !xerrors.Is(err, context.Canceled) {
-					log.Error(ctx, "report stats", slog.Error(err))
-				}
-				continue
-			}
-
-			nextInterval = resp.ReportInterval
-			break
-		}
-
-		if nextInterval != 0 && interval != nextInterval {
-			setInterval(nextInterval)
-		}
-		interval = nextInterval
-	}
-
-	// Send an empty stat to get the interval.
-	postStat(&Stats{})
-
-	go func() {
-		defer close(exited)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case stat, ok := <-statsChan:
-				if !ok {
-					return
-				}
-
-				postStat(stat)
-			}
-		}
-	}()
-
-	return closeFunc(func() error {
-		cancel()
-		<-exited
-		return nil
-	}), nil
-}
-
 // Stats records the Agent's network connection statistics for use in
 // user-facing metrics and debugging.
 type Stats struct {
@@ -488,6 +514,10 @@ type Stats struct {
 	Metrics []AgentMetric `json:"metrics"`
 }
 
+func (s Stats) SessionCount() int64 {
+	return s.SessionCountVSCode + s.SessionCountJetBrains + s.SessionCountReconnectingPTY + s.SessionCountSSH
+}
+
 type AgentMetricType string
 
 const (
@@ -496,9 +526,15 @@ const (
 )
 
 type AgentMetric struct {
-	Name  string          `json:"name" validate:"required"`
-	Type  AgentMetricType `json:"type" validate:"required" enums:"counter,gauge"`
-	Value float64         `json:"value" validate:"required"`
+	Name   string             `json:"name" validate:"required"`
+	Type   AgentMetricType    `json:"type" validate:"required" enums:"counter,gauge"`
+	Value  float64            `json:"value" validate:"required"`
+	Labels []AgentMetricLabel `json:"labels,omitempty"`
+}
+
+type AgentMetricLabel struct {
+	Name  string `json:"name" validate:"required"`
+	Value string `json:"value" validate:"required"`
 }
 
 type StatsResponse struct {
@@ -507,73 +543,34 @@ type StatsResponse struct {
 	ReportInterval time.Duration `json:"report_interval"`
 }
 
-func (c *Client) PostStats(ctx context.Context, stats *Stats) (StatsResponse, error) {
-	res, err := c.SDK.Request(ctx, http.MethodPost, "/api/v2/workspaceagents/me/report-stats", stats)
-	if err != nil {
-		return StatsResponse{}, xerrors.Errorf("send request: %w", err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return StatsResponse{}, codersdk.ReadBodyAsError(res)
-	}
-
-	var interval StatsResponse
-	err = json.NewDecoder(res.Body).Decode(&interval)
-	if err != nil {
-		return StatsResponse{}, xerrors.Errorf("decode stats response: %w", err)
-	}
-
-	return interval, nil
-}
-
 type PostLifecycleRequest struct {
-	State codersdk.WorkspaceAgentLifecycle `json:"state"`
-}
-
-func (c *Client) PostLifecycle(ctx context.Context, req PostLifecycleRequest) error {
-	res, err := c.SDK.Request(ctx, http.MethodPost, "/api/v2/workspaceagents/me/report-lifecycle", req)
-	if err != nil {
-		return xerrors.Errorf("agent state post request: %w", err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusNoContent {
-		return codersdk.ReadBodyAsError(res)
-	}
-
-	return nil
+	State     codersdk.WorkspaceAgentLifecycle `json:"state"`
+	ChangedAt time.Time                        `json:"changed_at"`
 }
 
 type PostStartupRequest struct {
-	Version           string `json:"version"`
-	ExpandedDirectory string `json:"expanded_directory"`
+	Version           string                    `json:"version"`
+	ExpandedDirectory string                    `json:"expanded_directory"`
+	Subsystems        []codersdk.AgentSubsystem `json:"subsystems"`
 }
 
-func (c *Client) PostStartup(ctx context.Context, req PostStartupRequest) error {
-	res, err := c.SDK.Request(ctx, http.MethodPost, "/api/v2/workspaceagents/me/startup", req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return codersdk.ReadBodyAsError(res)
-	}
-	return nil
-}
-
-type StartupLog struct {
+type Log struct {
 	CreatedAt time.Time         `json:"created_at"`
 	Output    string            `json:"output"`
 	Level     codersdk.LogLevel `json:"level"`
 }
 
-type PatchStartupLogs struct {
-	Logs []StartupLog `json:"logs"`
+type PatchLogs struct {
+	LogSourceID uuid.UUID `json:"log_source_id"`
+	Logs        []Log     `json:"logs"`
 }
 
-// PatchStartupLogs writes log messages to the agent startup script.
+// PatchLogs writes log messages to the agent startup script.
 // Log messages are limited to 1MB in total.
-func (c *Client) PatchStartupLogs(ctx context.Context, req PatchStartupLogs) error {
-	res, err := c.SDK.Request(ctx, http.MethodPatch, "/api/v2/workspaceagents/me/startup-logs", req)
+//
+// Deprecated: use the DRPCAgentClient.BatchCreateLogs instead
+func (c *Client) PatchLogs(ctx context.Context, req PatchLogs) error {
+	res, err := c.SDK.Request(ctx, http.MethodPatch, "/api/v2/workspaceagents/me/logs", req)
 	if err != nil {
 		return err
 	}
@@ -584,97 +581,108 @@ func (c *Client) PatchStartupLogs(ctx context.Context, req PatchStartupLogs) err
 	return nil
 }
 
-type GitAuthResponse struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	URL      string `json:"url"`
+// PatchAppStatus updates the status of a workspace app.
+type PatchAppStatus struct {
+	AppSlug string                           `json:"app_slug"`
+	State   codersdk.WorkspaceAppStatusState `json:"state"`
+	Message string                           `json:"message"`
+	URI     string                           `json:"uri"`
+	// Deprecated: this field is unused and will be removed in a future version.
+	Icon string `json:"icon"`
+	// Deprecated: this field is unused and will be removed in a future version.
+	NeedsUserAttention bool `json:"needs_user_attention"`
 }
 
-// GitAuth submits a URL to fetch a GIT_ASKPASS username and password for.
-// nolint:revive
-func (c *Client) GitAuth(ctx context.Context, gitURL string, listen bool) (GitAuthResponse, error) {
-	reqURL := "/api/v2/workspaceagents/me/gitauth?url=" + url.QueryEscape(gitURL)
-	if listen {
-		reqURL += "&listen"
+func (c *Client) PatchAppStatus(ctx context.Context, req PatchAppStatus) error {
+	res, err := c.SDK.Request(ctx, http.MethodPatch, "/api/v2/workspaceagents/me/app-status", req)
+	if err != nil {
+		return err
 	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return codersdk.ReadBodyAsError(res)
+	}
+	return nil
+}
+
+type PostLogSourceRequest struct {
+	// ID is a unique identifier for the log source.
+	// It is scoped to a workspace agent, and can be statically
+	// defined inside code to prevent duplicate sources from being
+	// created for the same agent.
+	ID          uuid.UUID `json:"id"`
+	DisplayName string    `json:"display_name"`
+	Icon        string    `json:"icon"`
+}
+
+func (c *Client) PostLogSource(ctx context.Context, req PostLogSourceRequest) (codersdk.WorkspaceAgentLogSource, error) {
+	res, err := c.SDK.Request(ctx, http.MethodPost, "/api/v2/workspaceagents/me/log-source", req)
+	if err != nil {
+		return codersdk.WorkspaceAgentLogSource{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusCreated {
+		return codersdk.WorkspaceAgentLogSource{}, codersdk.ReadBodyAsError(res)
+	}
+	var logSource codersdk.WorkspaceAgentLogSource
+	return logSource, json.NewDecoder(res.Body).Decode(&logSource)
+}
+
+type ExternalAuthResponse struct {
+	AccessToken string                 `json:"access_token"`
+	TokenExtra  map[string]interface{} `json:"token_extra"`
+	URL         string                 `json:"url"`
+	Type        string                 `json:"type"`
+
+	// Deprecated: Only supported on `/workspaceagents/me/gitauth`
+	// for backwards compatibility.
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// ExternalAuthRequest is used to request an access token for a provider.
+// Either ID or Match must be specified, but not both.
+type ExternalAuthRequest struct {
+	// ID is the ID of a provider to request authentication for.
+	ID string
+	// Match is an arbitrary string matched against the regex of the provider.
+	Match string
+	// Listen indicates that the request should be long-lived and listen for
+	// a new token to be requested.
+	Listen bool
+}
+
+// ExternalAuth submits a URL or provider ID to fetch an access token for.
+// nolint:revive
+func (c *Client) ExternalAuth(ctx context.Context, req ExternalAuthRequest) (ExternalAuthResponse, error) {
+	q := url.Values{
+		"id":    []string{req.ID},
+		"match": []string{req.Match},
+	}
+	if req.Listen {
+		q.Set("listen", "true")
+	}
+	reqURL := "/api/v2/workspaceagents/me/external-auth?" + q.Encode()
 	res, err := c.SDK.Request(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return GitAuthResponse{}, xerrors.Errorf("execute request: %w", err)
+		return ExternalAuthResponse{}, xerrors.Errorf("execute request: %w", err)
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return GitAuthResponse{}, codersdk.ReadBodyAsError(res)
+		return ExternalAuthResponse{}, codersdk.ReadBodyAsError(res)
 	}
 
-	var authResp GitAuthResponse
+	var authResp ExternalAuthResponse
 	return authResp, json.NewDecoder(res.Body).Decode(&authResp)
 }
 
-type closeFunc func() error
-
-func (c closeFunc) Close() error {
-	return c()
+// LogsNotifyChannel returns the channel name responsible for notifying
+// of new logs.
+func LogsNotifyChannel(agentID uuid.UUID) string {
+	return fmt.Sprintf("agent-logs:%s", agentID)
 }
 
-// wsNetConn wraps net.Conn created by websocket.NetConn(). Cancel func
-// is called if a read or write error is encountered.
-type wsNetConn struct {
-	cancel context.CancelFunc
-	net.Conn
-}
-
-func (c *wsNetConn) Read(b []byte) (n int, err error) {
-	n, err = c.Conn.Read(b)
-	if err != nil {
-		c.cancel()
-	}
-	return n, err
-}
-
-func (c *wsNetConn) Write(b []byte) (n int, err error) {
-	n, err = c.Conn.Write(b)
-	if err != nil {
-		c.cancel()
-	}
-	return n, err
-}
-
-func (c *wsNetConn) Close() error {
-	defer c.cancel()
-	return c.Conn.Close()
-}
-
-// websocketNetConn wraps websocket.NetConn and returns a context that
-// is tied to the parent context and the lifetime of the conn. Any error
-// during read or write will cancel the context, but not close the
-// conn. Close should be called to release context resources.
-func websocketNetConn(ctx context.Context, conn *websocket.Conn, msgType websocket.MessageType) (context.Context, net.Conn) {
-	ctx, cancel := context.WithCancel(ctx)
-	nc := websocket.NetConn(ctx, conn, msgType)
-	return ctx, &wsNetConn{
-		cancel: cancel,
-		Conn:   nc,
-	}
-}
-
-// StartupLogsNotifyChannel returns the channel name responsible for notifying
-// of new startup logs.
-func StartupLogsNotifyChannel(agentID uuid.UUID) string {
-	return fmt.Sprintf("startup-logs:%s", agentID)
-}
-
-type StartupLogsNotifyMessage struct {
+type LogsNotifyMessage struct {
 	CreatedAfter int64 `json:"created_after"`
-	EndOfLogs    bool  `json:"end_of_logs"`
-}
-
-type closeNetConn struct {
-	net.Conn
-	closeFunc func()
-}
-
-func (c *closeNetConn) Close() error {
-	c.closeFunc()
-	return c.Conn.Close()
 }

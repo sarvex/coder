@@ -1,41 +1,28 @@
-import { Story } from "@storybook/react"
-import {
-  mockApiError,
-  MockOrganization,
-  MockTemplateExample,
-} from "testHelpers/entities"
-import {
-  StarterTemplatePageView,
-  StarterTemplatePageViewProps,
-} from "./StarterTemplatePageView"
+import type { Meta, StoryObj } from "@storybook/react";
+import { chromatic } from "testHelpers/chromatic";
+import { MockTemplateExample, mockApiError } from "testHelpers/entities";
+import { StarterTemplatePageView } from "./StarterTemplatePageView";
 
-export default {
-  title: "pages/StarterTemplatePageView",
-  component: StarterTemplatePageView,
-}
+const meta: Meta<typeof StarterTemplatePageView> = {
+	title: "pages/StarterTemplatePage",
+	parameters: { chromatic },
+	component: StarterTemplatePageView,
+};
 
-const Template: Story<StarterTemplatePageViewProps> = (args) => (
-  <StarterTemplatePageView {...args} />
-)
+export default meta;
+type Story = StoryObj<typeof StarterTemplatePageView>;
 
-export const Default = Template.bind({})
-Default.args = {
-  context: {
-    exampleId: MockTemplateExample.id,
-    organizationId: MockOrganization.id,
-    error: undefined,
-    starterTemplate: MockTemplateExample,
-  },
-}
-
-export const Error = Template.bind({})
-Error.args = {
-  context: {
-    exampleId: MockTemplateExample.id,
-    organizationId: MockOrganization.id,
-    error: mockApiError({
-      message: `Example ${MockTemplateExample.id} not found.`,
-    }),
-    starterTemplate: undefined,
-  },
-}
+export const Example: Story = {
+	args: {
+		error: undefined,
+		starterTemplate: MockTemplateExample,
+	},
+};
+export const WithError: Story = {
+	args: {
+		error: mockApiError({
+			message: `Example ${MockTemplateExample.id} not found.`,
+		}),
+		starterTemplate: undefined,
+	},
+};

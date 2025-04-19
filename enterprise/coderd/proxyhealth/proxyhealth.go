@@ -3,6 +3,7 @@ package proxyhealth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -17,10 +18,10 @@ import (
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog"
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/database/dbauthz"
-	"github.com/coder/coder/coderd/prometheusmetrics"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbauthz"
+	"github.com/coder/coder/v2/coderd/prometheusmetrics"
+	"github.com/coder/coder/v2/codersdk"
 )
 
 type Status string
@@ -171,6 +172,11 @@ func (p *ProxyHealth) ForceUpdate(ctx context.Context) error {
 // HealthStatus returns the current health status of all proxies stored in the
 // cache.
 func (p *ProxyHealth) HealthStatus() map[uuid.UUID]ProxyStatus {
+	if p == nil {
+		// This can happen because workspace proxies are still an experiment.
+		// For the /regions endpoint, this will be nil in those cases.
+		return map[uuid.UUID]ProxyStatus{}
+	}
 	ptr := p.cache.Load()
 	if ptr == nil {
 		return map[uuid.UUID]ProxyStatus{}
@@ -210,7 +216,7 @@ func (p *ProxyHealth) ProxyHosts() []string {
 // unreachable.
 func (p *ProxyHealth) runOnce(ctx context.Context, now time.Time) (map[uuid.UUID]ProxyStatus, error) {
 	// Record from the given time.
-	defer p.healthCheckDuration.Observe(time.Since(now).Seconds())
+	defer func() { p.healthCheckDuration.Observe(time.Since(now).Seconds()) }()
 
 	//nolint:gocritic // Proxy health is a system service.
 	proxies, err := p.db.GetWorkspaceProxies(dbauthz.AsSystemRestricted(ctx))
@@ -270,8 +276,33 @@ func (p *ProxyHealth) runOnce(ctx context.Context, now time.Time) (map[uuid.UUID
 			case err == nil && resp.StatusCode == http.StatusOK:
 				err := json.NewDecoder(resp.Body).Decode(&status.Report)
 				if err != nil {
+					isCoderErr := xerrors.Errorf("proxy url %q is not a coder proxy instance, verify the url is correct", reqURL)
+					if resp.Header.Get(codersdk.BuildVersionHeader) != "" {
+						isCoderErr = xerrors.Errorf("proxy url %q is a coder instance, but unable to decode the response payload. Could this be a primary coderd and not a proxy?", reqURL)
+					}
+
+					// If the response is not json, then the user likely input a bad url that returns status code 200.
+					// This is very common, since most webpages do return a 200. So let's improve the error message.
+					if notJSONErr := codersdk.ExpectJSONMime(resp); notJSONErr != nil {
+						err = errors.Join(
+							isCoderErr,
+							xerrors.Errorf("attempted to query health at %q but got back the incorrect content type: %w", reqURL, notJSONErr),
+						)
+
+						status.Report.Errors = []string{
+							err.Error(),
+						}
+						status.Status = Unhealthy
+						break
+					}
+
 					// If we cannot read the report, mark the proxy as unhealthy.
-					status.Report.Errors = []string{fmt.Sprintf("failed to decode health report: %s", err.Error())}
+					status.Report.Errors = []string{
+						errors.Join(
+							isCoderErr,
+							xerrors.Errorf("received a status code 200, but failed to decode health report body: %w", err),
+						).Error(),
+					}
 					status.Status = Unhealthy
 					break
 				}
@@ -284,7 +315,25 @@ func (p *ProxyHealth) runOnce(ctx context.Context, now time.Time) (map[uuid.UUID
 			case err == nil && resp.StatusCode != http.StatusOK:
 				// Unhealthy as we did reach the proxy but it got an unexpected response.
 				status.Status = Unhealthy
-				status.Report.Errors = []string{fmt.Sprintf("unexpected status code %d", resp.StatusCode)}
+				var builder strings.Builder
+				// This string is shown on the UI where newlines are respected.
+				// This error message is not ever decoded programmatically, so keep it human-
+				// readable.
+				builder.WriteString(fmt.Sprintf("unexpected status code %d. ", resp.StatusCode))
+				builder.WriteString(fmt.Sprintf("\nEncountered error, send a request to %q from the Coderd environment to debug this issue.", reqURL))
+				// err will always be non-nil
+				err := codersdk.ReadBodyAsError(resp)
+				var apiErr *codersdk.Error
+				if xerrors.As(err, &apiErr) {
+					builder.WriteString(fmt.Sprintf("\nError Message: %s\nError Detail: %s", apiErr.Message, apiErr.Detail))
+					for _, v := range apiErr.Validations {
+						// Pretty sure this is not possible from the called endpoint, but just in case.
+						builder.WriteString(fmt.Sprintf("\n\tValidation: %s=%s", v.Field, v.Detail))
+					}
+				}
+				builder.WriteString(fmt.Sprintf("\nError: %s", err.Error()))
+
+				status.Report.Errors = []string{builder.String()}
 			case err != nil:
 				// Request failed, mark the proxy as unreachable.
 				status.Status = Unreachable

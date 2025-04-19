@@ -8,28 +8,28 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/cliui"
+	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/pretty"
+	"github.com/coder/serpent"
 )
 
-func (r *RootCmd) gitssh() *clibase.Cmd {
-	cmd := &clibase.Cmd{
+func (r *RootCmd) gitssh() *serpent.Command {
+	cmd := &serpent.Command{
 		Use:    "gitssh",
 		Hidden: true,
 		Short:  `Wraps the "ssh" command and uses the coder gitssh key for authentication`,
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			ctx := inv.Context()
 			env := os.Environ()
 
 			// Catch interrupt signals to ensure the temporary private
 			// key file is cleaned up on most cases.
-			ctx, stop := signal.NotifyContext(ctx, InterruptSignals...)
+			ctx, stop := inv.SignalNotifyContext(ctx, StopSignals...)
 			defer stop()
 
 			// Early check so errors are reported immediately.
@@ -90,12 +90,15 @@ func (r *RootCmd) gitssh() *clibase.Cmd {
 				exitErr := &exec.ExitError{}
 				if xerrors.As(err, &exitErr) && exitErr.ExitCode() == 255 {
 					_, _ = fmt.Fprintln(inv.Stderr,
-						"\n"+cliui.Styles.Wrap.Render("Coder authenticates with "+cliui.Styles.Field.Render("git")+
-							" using the public key below. All clones with SSH are authenticated automatically 🪄.")+"\n")
-					_, _ = fmt.Fprintln(inv.Stderr, cliui.Styles.Code.Render(strings.TrimSpace(key.PublicKey))+"\n")
+						"\n"+pretty.Sprintf(
+							cliui.DefaultStyles.Wrap, "%s",
+							"Coder authenticates with "+pretty.Sprint(cliui.DefaultStyles.Field, "git")+
+								" using the public key below. All clones with SSH are authenticated automatically 🪄.")+"\n",
+					)
+					_, _ = fmt.Fprintln(inv.Stderr, pretty.Sprint(cliui.DefaultStyles.Code, strings.TrimSpace(key.PublicKey))+"\n")
 					_, _ = fmt.Fprintln(inv.Stderr, "Add to GitHub and GitLab:")
-					_, _ = fmt.Fprintln(inv.Stderr, cliui.Styles.Prompt.String()+"https://github.com/settings/ssh/new")
-					_, _ = fmt.Fprintln(inv.Stderr, cliui.Styles.Prompt.String()+"https://gitlab.com/-/profile/keys")
+					pretty.Fprintf(inv.Stderr, cliui.DefaultStyles.Prompt, "%s", "https://github.com/settings/ssh/new\n\n")
+					pretty.Fprintf(inv.Stderr, cliui.DefaultStyles.Prompt, "%s", "https://gitlab.com/-/profile/keys\n\n")
 					_, _ = fmt.Fprintln(inv.Stderr)
 					return err
 				}
@@ -135,7 +138,7 @@ var fallbackIdentityFiles = strings.Join([]string{
 //
 // The extra arguments work without issue and lets us run the command
 // as-is without stripping out the excess (git-upload-pack 'coder/coder').
-func parseIdentityFilesForHost(ctx context.Context, args, env []string) (identityFiles []string, error error) {
+func parseIdentityFilesForHost(ctx context.Context, args, env []string) (identityFiles []string, err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, xerrors.Errorf("get user home dir failed: %w", err)

@@ -3,79 +3,42 @@ package cli
 import (
 	"fmt"
 
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/codersdk"
+	"golang.org/x/xerrors"
+
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/serpent"
 )
 
-func (r *RootCmd) update() *clibase.Cmd {
+func (r *RootCmd) update() *serpent.Command {
 	var (
-		parameterFile     string
-		richParameterFile string
-		alwaysPrompt      bool
+		parameterFlags workspaceParameterFlags
+		bflags         buildFlags
 	)
-
 	client := new(codersdk.Client)
-	cmd := &clibase.Cmd{
+	cmd := &serpent.Command{
 		Annotations: workspaceCommand,
 		Use:         "update <workspace>",
 		Short:       "Will update and start a given workspace if it is out of date",
 		Long:        "Use --always-prompt to change the parameter values of the workspace.",
-		Middleware: clibase.Chain(
-			clibase.RequireNArgs(1),
+		Middleware: serpent.Chain(
+			serpent.RequireNArgs(1),
 			r.InitClient(client),
 		),
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			workspace, err := namedWorkspace(inv.Context(), client, inv.Args[0])
 			if err != nil {
 				return err
 			}
-			if !workspace.Outdated && !alwaysPrompt {
-				_, _ = fmt.Fprintf(inv.Stdout, "Workspace isn't outdated!\n")
-				return nil
-			}
-			template, err := client.Template(inv.Context(), workspace.TemplateID)
-			if err != nil {
+			if !workspace.Outdated && !parameterFlags.promptRichParameters && !parameterFlags.promptEphemeralParameters && len(parameterFlags.ephemeralParameters) == 0 {
+				_, _ = fmt.Fprintf(inv.Stdout, "Workspace is up-to-date.\n")
 				return nil
 			}
 
-			var existingParams []codersdk.Parameter
-			var existingRichParams []codersdk.WorkspaceBuildParameter
-			if !alwaysPrompt {
-				existingParams, err = client.Parameters(inv.Context(), codersdk.ParameterWorkspace, workspace.ID)
-				if err != nil {
-					return nil
-				}
-
-				existingRichParams, err = client.WorkspaceBuildParameters(inv.Context(), workspace.LatestBuild.ID)
-				if err != nil {
-					return nil
-				}
-			}
-
-			buildParams, err := prepWorkspaceBuild(inv, client, prepWorkspaceBuildArgs{
-				Template:           template,
-				ExistingParams:     existingParams,
-				ParameterFile:      parameterFile,
-				ExistingRichParams: existingRichParams,
-				RichParameterFile:  richParameterFile,
-				NewWorkspaceName:   workspace.Name,
-
-				UpdateWorkspace: true,
-				WorkspaceID:     workspace.LatestBuild.ID,
-			})
+			build, err := startWorkspace(inv, client, workspace, parameterFlags, bflags, WorkspaceUpdate)
 			if err != nil {
-				return nil
+				return xerrors.Errorf("start workspace: %w", err)
 			}
 
-			build, err := client.CreateWorkspaceBuild(inv.Context(), workspace.ID, codersdk.CreateWorkspaceBuildRequest{
-				TemplateVersionID:   template.ActiveVersionID,
-				Transition:          codersdk.WorkspaceTransitionStart,
-				ParameterValues:     buildParams.parameters,
-				RichParameterValues: buildParams.richParameters,
-			})
-			if err != nil {
-				return err
-			}
 			logs, closer, err := client.WorkspaceBuildLogsAfter(inv.Context(), build.ID, 0)
 			if err != nil {
 				return err
@@ -92,25 +55,7 @@ func (r *RootCmd) update() *clibase.Cmd {
 		},
 	}
 
-	cmd.Options = clibase.OptionSet{
-		{
-			Flag:        "always-prompt",
-			Description: "Always prompt all parameters. Does not pull parameter values from existing workspace.",
-
-			Value: clibase.BoolOf(&alwaysPrompt),
-		},
-		{
-			Flag:        "parameter-file",
-			Description: "Specify a file path with parameter values.",
-			Env:         "CODER_PARAMETER_FILE",
-			Value:       clibase.StringOf(&parameterFile),
-		},
-		{
-			Flag:        "rich-parameter-file",
-			Description: "Specify a file path with values for rich parameters defined in the template.",
-			Env:         "CODER_RICH_PARAMETER_FILE",
-			Value:       clibase.StringOf(&richParameterFile),
-		},
-	}
+	cmd.Options = append(cmd.Options, parameterFlags.allOptions()...)
+	cmd.Options = append(cmd.Options, bflags.cliOptions()...)
 	return cmd
 }

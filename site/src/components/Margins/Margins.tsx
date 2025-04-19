@@ -1,39 +1,41 @@
-import { makeStyles } from "@mui/styles"
-import { FC } from "react"
-import { combineClasses } from "utils/combineClasses"
+import type { FC } from "react";
 import {
-  containerWidth,
-  containerWidthMedium,
-  sidePadding,
-} from "../../theme/constants"
+	containerWidth,
+	containerWidthMedium,
+	sidePadding,
+} from "theme/constants";
 
-type Size = "regular" | "medium" | "small"
+type Size = "regular" | "medium" | "small";
 
 const widthBySize: Record<Size, number> = {
-  regular: containerWidth,
-  medium: containerWidthMedium,
-  small: containerWidth / 3,
-}
+	regular: containerWidth,
+	medium: containerWidthMedium,
+	small: containerWidth / 3,
+};
 
-const useStyles = makeStyles(() => ({
-  margins: {
-    margin: "0 auto",
-    maxWidth: ({ maxWidth }: { maxWidth: number }) => maxWidth,
-    padding: `0 ${sidePadding}px`,
-    flex: 1,
-    width: "100%",
-  },
-}))
+type MarginsProps = JSX.IntrinsicElements["div"] & {
+	size?: Size;
+};
 
-export const Margins: FC<JSX.IntrinsicElements["div"] & { size?: Size }> = ({
-  size = "regular",
-  ...divProps
+export const Margins: FC<MarginsProps> = ({
+	size = "regular",
+	children,
+	...divProps
 }) => {
-  const styles = useStyles({ maxWidth: widthBySize[size] })
-  return (
-    <div
-      {...divProps}
-      className={combineClasses([styles.margins, divProps.className])}
-    />
-  )
-}
+	const maxWidth = widthBySize[size];
+	return (
+		<div
+			{...divProps}
+			css={{
+				marginLeft: "auto",
+				marginRight: "auto",
+				maxWidth: maxWidth,
+				paddingLeft: sidePadding,
+				paddingRight: sidePadding,
+				width: "100%",
+			}}
+		>
+			{children}
+		</div>
+	);
+};

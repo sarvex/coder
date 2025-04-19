@@ -1,111 +1,139 @@
-import { makeStyles } from "@mui/styles"
-import { useQuery } from "@tanstack/react-query"
-import { useMachine } from "@xstate/react"
-import { getWorkspaceBuildLogs } from "api/api"
-import { Workspace } from "api/typesGenerated"
-import { AlertBanner } from "components/AlertBanner/AlertBanner"
-import { ChooseOne, Cond } from "components/Conditionals/ChooseOne"
-import { Loader } from "components/Loader/Loader"
-import { FC, useRef } from "react"
-import { useParams } from "react-router-dom"
-import { quotaMachine } from "xServices/quotas/quotasXService"
-import { workspaceMachine } from "xServices/workspace/workspaceXService"
-import { WorkspaceReadyPage } from "./WorkspaceReadyPage"
-import { RequirePermission } from "components/RequirePermission/RequirePermission"
-
-const useFailedBuildLogs = (workspace: Workspace | undefined) => {
-  const now = useRef(new Date())
-  return useQuery({
-    queryKey: ["logs", workspace?.latest_build.id],
-    queryFn: () => {
-      if (!workspace) {
-        throw new Error(
-          `Build log query being called before workspace is defined`,
-        )
-      }
-
-      return getWorkspaceBuildLogs(workspace.latest_build.id, now.current)
-    },
-    enabled: workspace?.latest_build.job.error !== undefined,
-  })
-}
+import { watchWorkspace } from "api/api";
+import { checkAuthorization } from "api/queries/authCheck";
+import { template as templateQueryOptions } from "api/queries/templates";
+import { workspaceBuildsKey } from "api/queries/workspaceBuilds";
+import { workspaceByOwnerAndName } from "api/queries/workspaces";
+import type { Workspace } from "api/typesGenerated";
+import { ErrorAlert } from "components/Alert/ErrorAlert";
+import { displayError } from "components/GlobalSnackbar/utils";
+import { Loader } from "components/Loader/Loader";
+import { Margins } from "components/Margins/Margins";
+import { useEffectEvent } from "hooks/hookPolyfills";
+import { AnnouncementBanners } from "modules/dashboard/AnnouncementBanners/AnnouncementBanners";
+import { Navbar } from "modules/dashboard/Navbar/Navbar";
+import { type FC, useEffect } from "react";
+import { useQuery, useQueryClient } from "react-query";
+import { useParams } from "react-router-dom";
+import { WorkspaceReadyPage } from "./WorkspaceReadyPage";
+import { type WorkspacePermissions, workspaceChecks } from "./permissions";
 
 export const WorkspacePage: FC = () => {
-  const { username, workspace: workspaceName } = useParams() as {
-    username: string
-    workspace: string
-  }
-  const [workspaceState, workspaceSend] = useMachine(workspaceMachine, {
-    context: {
-      workspaceName,
-      username,
-    },
-  })
-  const {
-    workspace,
-    getWorkspaceError,
-    getTemplateWarning,
-    getTemplateParametersWarning,
-    checkPermissionsError,
-  } = workspaceState.context
-  const [quotaState] = useMachine(quotaMachine, { context: { username } })
-  const { getQuotaError } = quotaState.context
-  const styles = useStyles()
-  const failedBuildLogs = useFailedBuildLogs(workspace)
+	const queryClient = useQueryClient();
+	const params = useParams() as {
+		username: string;
+		workspace: string;
+	};
+	const workspaceName = params.workspace;
+	const username = params.username.replace("@", "");
 
-  return (
-    <RequirePermission
-      isFeatureVisible={getWorkspaceError?.response?.status !== 404}
-    >
-      <ChooseOne>
-        <Cond condition={workspaceState.matches("error")}>
-          <div className={styles.error}>
-            {Boolean(getWorkspaceError) && (
-              <AlertBanner severity="error" error={getWorkspaceError} />
-            )}
-            {Boolean(getTemplateWarning) && (
-              <AlertBanner severity="error" error={getTemplateWarning} />
-            )}
-            {Boolean(getTemplateParametersWarning) && (
-              <AlertBanner
-                severity="error"
-                error={getTemplateParametersWarning}
-              />
-            )}
-            {Boolean(checkPermissionsError) && (
-              <AlertBanner severity="error" error={checkPermissionsError} />
-            )}
-            {Boolean(getQuotaError) && (
-              <AlertBanner severity="error" error={getQuotaError} />
-            )}
-          </div>
-        </Cond>
-        <Cond
-          condition={
-            Boolean(workspace) &&
-            workspaceState.matches("ready") &&
-            quotaState.matches("success")
-          }
-        >
-          <WorkspaceReadyPage
-            failedBuildLogs={failedBuildLogs.data}
-            workspaceState={workspaceState}
-            quotaState={quotaState}
-            workspaceSend={workspaceSend}
-          />
-        </Cond>
-        <Cond>
-          <Loader />
-        </Cond>
-      </ChooseOne>
-    </RequirePermission>
-  )
-}
+	// Workspace
+	const workspaceQueryOptions = workspaceByOwnerAndName(
+		username,
+		workspaceName,
+	);
+	const workspaceQuery = useQuery(workspaceQueryOptions);
+	const workspace = workspaceQuery.data;
 
-const useStyles = makeStyles((theme) => ({
-  error: {
-    margin: theme.spacing(2),
-  },
-}))
+	// Template
+	const templateQuery = useQuery(
+		workspace
+			? templateQueryOptions(workspace.template_id)
+			: { enabled: false },
+	);
+	const template = templateQuery.data;
 
-export default WorkspacePage
+	// Permissions
+	const checks =
+		workspace && template ? workspaceChecks(workspace, template) : {};
+	const permissionsQuery = useQuery({
+		...checkAuthorization({ checks }),
+		enabled: workspace !== undefined && template !== undefined,
+	});
+	const permissions = permissionsQuery.data as WorkspacePermissions | undefined;
+
+	// Watch workspace changes
+	const updateWorkspaceData = useEffectEvent(
+		async (newWorkspaceData: Workspace) => {
+			if (!workspace) {
+				throw new Error(
+					"Applying an update for a workspace that is undefined.",
+				);
+			}
+
+			queryClient.setQueryData(
+				workspaceQueryOptions.queryKey,
+				newWorkspaceData,
+			);
+
+			const hasNewBuild =
+				newWorkspaceData.latest_build.id !== workspace.latest_build.id;
+			const lastBuildHasChanged =
+				newWorkspaceData.latest_build.status !== workspace.latest_build.status;
+
+			if (hasNewBuild || lastBuildHasChanged) {
+				await queryClient.invalidateQueries(
+					workspaceBuildsKey(newWorkspaceData.id),
+				);
+			}
+		},
+	);
+	const workspaceId = workspace?.id;
+	useEffect(() => {
+		if (!workspaceId) {
+			return;
+		}
+
+		const socket = watchWorkspace(workspaceId);
+		socket.addEventListener("message", (event) => {
+			if (event.parseError) {
+				displayError(
+					"Unable to process latest data from the server. Please try refreshing the page.",
+				);
+				return;
+			}
+
+			if (event.parsedMessage.type === "data") {
+				updateWorkspaceData(event.parsedMessage.data as Workspace);
+			}
+		});
+		socket.addEventListener("error", () => {
+			displayError(
+				"Unable to get workspace changes. Connection has been closed.",
+			);
+		});
+
+		return () => socket.close();
+	}, [updateWorkspaceData, workspaceId]);
+
+	// Page statuses
+	const pageError =
+		workspaceQuery.error ?? templateQuery.error ?? permissionsQuery.error;
+	const isLoading = !workspace || !template || !permissions;
+
+	return (
+		<>
+			<AnnouncementBanners />
+			<div css={{ height: "100%", display: "flex", flexDirection: "column" }}>
+				<Navbar />
+				{pageError ? (
+					<Margins>
+						<ErrorAlert
+							error={pageError}
+							css={{ marginTop: 16, marginBottom: 16 }}
+						/>
+					</Margins>
+				) : isLoading ? (
+					<Loader />
+				) : (
+					<WorkspaceReadyPage
+						workspace={workspace}
+						template={template}
+						permissions={permissions}
+					/>
+				)}
+			</div>
+		</>
+	);
+};
+
+export default WorkspacePage;

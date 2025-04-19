@@ -6,10 +6,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/coderd/coderdtest"
-	"github.com/coder/coder/coderd/httpmw"
-	"github.com/coder/coder/codersdk"
-	"github.com/coder/coder/testutil"
+	"github.com/coder/coder/v2/coderd/coderdtest"
+	"github.com/coder/coder/v2/coderd/httpmw"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/testutil"
 )
 
 func Test_Experiments(t *testing.T) {
@@ -115,5 +115,22 @@ func Test_Experiments(t *testing.T) {
 		_, err := client.Experiments(ctx)
 		require.Error(t, err)
 		require.ErrorContains(t, err, httpmw.SignedOutErrorMessage)
+	})
+
+	t.Run("available experiments", func(t *testing.T) {
+		t.Parallel()
+		cfg := coderdtest.DeploymentValues(t)
+		client := coderdtest.New(t, &coderdtest.Options{
+			DeploymentValues: cfg,
+		})
+		_ = coderdtest.CreateFirstUser(t, client)
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+		defer cancel()
+
+		experiments, err := client.SafeExperiments(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, experiments)
+		require.ElementsMatch(t, codersdk.ExperimentsAll, experiments.Safe)
 	})
 }

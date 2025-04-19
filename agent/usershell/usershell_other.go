@@ -11,6 +11,7 @@ import (
 )
 
 // Get returns the /etc/passwd entry for the username provided.
+// Deprecated: use SystemEnvInfo.UserShell instead.
 func Get(username string) (string, error) {
 	contents, err := os.ReadFile("/etc/passwd")
 	if err != nil {
@@ -27,5 +28,8 @@ func Get(username string) (string, error) {
 		}
 		return parts[6], nil
 	}
-	return "", xerrors.Errorf("user %q not found in /etc/passwd", username)
+	if s := os.Getenv("SHELL"); s != "" {
+		return s, nil
+	}
+	return "", xerrors.Errorf("shell for user %q not found in /etc/passwd or $SHELL", username)
 }

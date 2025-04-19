@@ -7,8 +7,7 @@ import (
 	"time"
 
 	"cdr.dev/slog"
-	"github.com/coder/coder/coderd/httpmw"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/v2/codersdk"
 )
 
 const (
@@ -23,6 +22,7 @@ const (
 type ResolveRequestOptions struct {
 	Logger              slog.Logger
 	SignedTokenProvider SignedTokenProvider
+	CookieCfg           codersdk.HTTPCookieConfig
 
 	DashboardURL   *url.URL
 	PathAppBaseURL *url.URL
@@ -39,7 +39,7 @@ type ResolveRequestOptions struct {
 
 func ResolveRequest(rw http.ResponseWriter, r *http.Request, opts ResolveRequestOptions) (*SignedToken, bool) {
 	appReq := opts.AppRequest.Normalize()
-	err := appReq.Validate()
+	err := appReq.Check()
 	if err != nil {
 		// This is a 500 since it's a coder server or proxy that's making this
 		// request struct based on details from the request. The values should
@@ -58,7 +58,7 @@ func ResolveRequest(rw http.ResponseWriter, r *http.Request, opts ResolveRequest
 		AppRequest:     appReq,
 		PathAppBaseURL: opts.PathAppBaseURL.String(),
 		AppHostname:    opts.AppHostname,
-		SessionToken:   httpmw.APITokenFromRequest(r),
+		SessionToken:   AppConnectSessionTokenFromRequest(r, appReq.AccessMethod),
 		AppPath:        opts.AppPath,
 		AppQuery:       opts.AppQuery,
 	}
@@ -68,15 +68,20 @@ func ResolveRequest(rw http.ResponseWriter, r *http.Request, opts ResolveRequest
 		return nil, false
 	}
 
-	// Write the signed app token cookie. We always want this to apply to the
-	// current hostname (even for subdomain apps, without any wildcard
-	// shenanigans, because the token is only valid for a single app).
-	http.SetCookie(rw, &http.Cookie{
-		Name:    codersdk.DevURLSignedAppTokenCookie,
+	// Write the signed app token cookie.
+	//
+	// For path apps, this applies to only the path app base URL on the current
+	// domain, e.g.
+	//   /@user/workspace[.agent]/apps/path-app/
+	//
+	// For subdomain apps, this applies to the entire subdomain, e.g.
+	//   app--agent--workspace--user.apps.example.com
+	http.SetCookie(rw, opts.CookieCfg.Apply(&http.Cookie{
+		Name:    codersdk.SignedAppTokenCookie,
 		Value:   tokenStr,
 		Path:    appReq.BasePath,
-		Expires: token.Expiry,
-	})
+		Expires: token.Expiry.Time(),
+	}))
 
 	return token, true
 }

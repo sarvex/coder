@@ -3,7 +3,9 @@ package site_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"io/fs"
 	"net/http"
@@ -16,12 +18,116 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/site"
-	"github.com/coder/coder/testutil"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/db2sdk"
+	"github.com/coder/coder/v2/coderd/database/dbgen"
+	"github.com/coder/coder/v2/coderd/database/dbmem"
+	"github.com/coder/coder/v2/coderd/database/dbtestutil"
+	"github.com/coder/coder/v2/coderd/database/dbtime"
+	"github.com/coder/coder/v2/coderd/httpmw"
+	"github.com/coder/coder/v2/coderd/telemetry"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/site"
+	"github.com/coder/coder/v2/testutil"
 )
+
+func TestInjection(t *testing.T) {
+	t.Parallel()
+
+	siteFS := fstest.MapFS{
+		"index.html": &fstest.MapFile{
+			Data: []byte("{{ .User }}"),
+		},
+	}
+	binFs := http.FS(fstest.MapFS{})
+	db := dbmem.New()
+	handler := site.New(&site.Options{
+		Telemetry: telemetry.NewNoop(),
+		BinFS:     binFs,
+		Database:  db,
+		SiteFS:    siteFS,
+	})
+
+	user := dbgen.User(t, db, database.User{})
+	_, token := dbgen.APIKey(t, db, database.APIKey{
+		UserID:    user.ID,
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set(codersdk.SessionTokenHeader, token)
+	rw := httptest.NewRecorder()
+
+	handler.ServeHTTP(rw, r)
+	require.Equal(t, http.StatusOK, rw.Code)
+	var got codersdk.User
+	err := json.Unmarshal([]byte(html.UnescapeString(rw.Body.String())), &got)
+	require.NoError(t, err)
+
+	// This will update as part of the request!
+	got.LastSeenAt = user.LastSeenAt
+
+	require.Equal(t, db2sdk.User(user, []uuid.UUID{}), got)
+}
+
+func TestInjectionFailureProducesCleanHTML(t *testing.T) {
+	t.Parallel()
+
+	db := dbmem.New()
+
+	// Create an expired user with a refresh token, but provide no OAuth2
+	// configuration so that refresh is impossible, this should result in
+	// an error when httpmw.ExtractAPIKey is called.
+	user := dbgen.User(t, db, database.User{})
+	_, token := dbgen.APIKey(t, db, database.APIKey{
+		UserID:    user.ID,
+		LastUsed:  dbtime.Now().Add(-time.Hour),
+		ExpiresAt: dbtime.Now().Add(-time.Second),
+		LoginType: database.LoginTypeGithub,
+	})
+	_ = dbgen.UserLink(t, db, database.UserLink{
+		UserID:            user.ID,
+		LoginType:         database.LoginTypeGithub,
+		OAuthRefreshToken: "hello",
+		OAuthExpiry:       dbtime.Now().Add(-time.Second),
+	})
+
+	binFs := http.FS(fstest.MapFS{})
+	siteFS := fstest.MapFS{
+		"index.html": &fstest.MapFile{
+			Data: []byte("<html>{{ .User }}</html>"),
+		},
+	}
+	handler := site.New(&site.Options{
+		Telemetry: telemetry.NewNoop(),
+		BinFS:     binFs,
+		Database:  db,
+		SiteFS:    siteFS,
+
+		// No OAuth2 configs, refresh will fail.
+		OAuth2Configs: &httpmw.OAuth2Configs{
+			Github: nil,
+			OIDC:   nil,
+		},
+	})
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set(codersdk.SessionTokenHeader, token)
+	rw := httptest.NewRecorder()
+
+	handler.ServeHTTP(rw, r)
+
+	// Ensure we get a clean HTML response with no user data or errors
+	// from httpmw.ExtractAPIKey.
+	assert.Equal(t, http.StatusOK, rw.Code)
+	body := rw.Body.String()
+	assert.Equal(t, "<html></html>", body)
+}
 
 func TestCaching(t *testing.T) {
 	t.Parallel()
@@ -45,7 +151,13 @@ func TestCaching(t *testing.T) {
 	}
 	binFS := http.FS(fstest.MapFS{})
 
-	srv := httptest.NewServer(site.Handler(rootFS, binFS, nil))
+	db, _ := dbtestutil.NewDB(t)
+	srv := httptest.NewServer(site.New(&site.Options{
+		Telemetry: telemetry.NewNoop(),
+		BinFS:     binFS,
+		SiteFS:    rootFS,
+		Database:  db,
+	}))
 	defer srv.Close()
 
 	// Create a context
@@ -102,10 +214,19 @@ func TestServingFiles(t *testing.T) {
 		"dashboard.css": &fstest.MapFile{
 			Data: []byte("dashboard-css-bytes"),
 		},
+		"install.sh": &fstest.MapFile{
+			Data: []byte("install-sh-bytes"),
+		},
 	}
 	binFS := http.FS(fstest.MapFS{})
 
-	srv := httptest.NewServer(site.Handler(rootFS, binFS, nil))
+	db, _ := dbtestutil.NewDB(t)
+	srv := httptest.NewServer(site.New(&site.Options{
+		Telemetry: telemetry.NewNoop(),
+		BinFS:     binFS,
+		SiteFS:    rootFS,
+		Database:  db,
+	}))
 	defer srv.Close()
 
 	// Create a context
@@ -140,6 +261,9 @@ func TestServingFiles(t *testing.T) {
 		// JS, CSS cases
 		{"/dashboard.js", "dashboard-js-bytes"},
 		{"/dashboard.css", "dashboard-css-bytes"},
+
+		// Install script
+		{"/install.sh", "install-sh-bytes"},
 	}
 
 	for _, testCase := range testCases {
@@ -358,7 +482,12 @@ func TestServingBin(t *testing.T) {
 				require.Error(t, err, "extraction or read did not fail")
 			}
 
-			srv := httptest.NewServer(site.Handler(rootFS, binFS, binHashes))
+			srv := httptest.NewServer(site.New(&site.Options{
+				Telemetry: telemetry.NewNoop(),
+				BinFS:     binFS,
+				BinHashes: binHashes,
+				SiteFS:    rootFS,
+			}))
 			defer srv.Close()
 
 			// Create a context
@@ -547,4 +676,30 @@ func TestRenderStaticErrorPageNoStatus(t *testing.T) {
 	require.Contains(t, bodyStr, d.Description)
 	require.Contains(t, bodyStr, "Retry")
 	require.Contains(t, bodyStr, d.DashboardURL)
+}
+
+func TestJustFilesSystem(t *testing.T) {
+	t.Parallel()
+
+	tfs := fstest.MapFS{
+		"dir/foo.txt": &fstest.MapFile{
+			Data: []byte("hello world"),
+		},
+		"dir/bar.txt": &fstest.MapFile{
+			Data: []byte("hello world"),
+		},
+	}
+
+	mux := chi.NewRouter()
+	mux.Mount("/onlyfiles/", http.StripPrefix("/onlyfiles", http.FileServer(http.FS(site.OnlyFiles(tfs)))))
+	mux.Mount("/all/", http.StripPrefix("/all", http.FileServer(http.FS(tfs))))
+
+	// The /all/ endpoint should serve the directory listing.
+	resp := httptest.NewRecorder()
+	mux.ServeHTTP(resp, httptest.NewRequest("GET", "/all/dir/", nil))
+	require.Equal(t, http.StatusOK, resp.Code, "all serves the directory")
+
+	resp = httptest.NewRecorder()
+	mux.ServeHTTP(resp, httptest.NewRequest("GET", "/onlyfiles/dir/", nil))
+	require.Equal(t, http.StatusNotFound, resp.Code, "onlyfiles does not serve the directory")
 }

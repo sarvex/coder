@@ -9,12 +9,16 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/database/dbfake"
-	"github.com/coder/coder/coderd/database/dbgen"
-	"github.com/coder/coder/coderd/httpmw"
-	"github.com/coder/coder/codersdk"
+	"cdr.dev/slog"
+	"github.com/coder/coder/v2/coderd/coderdtest"
+	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbauthz"
+	"github.com/coder/coder/v2/coderd/database/dbgen"
+	"github.com/coder/coder/v2/coderd/database/dbmem"
+	"github.com/coder/coder/v2/coderd/httpmw"
+	"github.com/coder/coder/v2/codersdk"
 )
 
 func TestWorkspaceAgentParam(t *testing.T) {
@@ -26,15 +30,17 @@ func TestWorkspaceAgentParam(t *testing.T) {
 			_, token = dbgen.APIKey(t, db, database.APIKey{
 				UserID: user.ID,
 			})
-			workspace = dbgen.Workspace(t, db, database.Workspace{
-				OwnerID: user.ID,
+			tpl       = dbgen.Template(t, db, database.Template{})
+			workspace = dbgen.Workspace(t, db, database.WorkspaceTable{
+				OwnerID:    user.ID,
+				TemplateID: tpl.ID,
 			})
 			build = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
 				WorkspaceID: workspace.ID,
 				Transition:  database.WorkspaceTransitionStart,
 				Reason:      database.BuildReasonInitiator,
 			})
-			job = dbgen.ProvisionerJob(t, db, database.ProvisionerJob{
+			job = dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
 				ID:            build.JobID,
 				Type:          database.ProvisionerJobTypeWorkspaceBuild,
 				Provisioner:   database.ProvisionerTypeEcho,
@@ -61,7 +67,7 @@ func TestWorkspaceAgentParam(t *testing.T) {
 
 	t.Run("None", func(t *testing.T) {
 		t.Parallel()
-		db := dbfake.New()
+		db := dbmem.New()
 		rtr := chi.NewRouter()
 		rtr.Use(httpmw.ExtractWorkspaceBuildParam(db))
 		rtr.Get("/", nil)
@@ -76,7 +82,7 @@ func TestWorkspaceAgentParam(t *testing.T) {
 
 	t.Run("NotFound", func(t *testing.T) {
 		t.Parallel()
-		db := dbfake.New()
+		db := dbmem.New()
 		rtr := chi.NewRouter()
 		rtr.Use(httpmw.ExtractWorkspaceAgentParam(db))
 		rtr.Get("/", nil)
@@ -91,9 +97,39 @@ func TestWorkspaceAgentParam(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, res.StatusCode)
 	})
 
+	t.Run("NotAuthorized", func(t *testing.T) {
+		t.Parallel()
+		db := dbmem.New()
+		fakeAuthz := (&coderdtest.FakeAuthorizer{}).AlwaysReturn(xerrors.Errorf("constant failure"))
+		dbFail := dbauthz.New(db, fakeAuthz, slog.Make(), coderdtest.AccessControlStorePointer())
+
+		rtr := chi.NewRouter()
+		rtr.Use(
+			httpmw.ExtractAPIKeyMW(httpmw.ExtractAPIKeyConfig{
+				DB:              db,
+				RedirectToLogin: false,
+			}),
+			// Only fail authz in this middleware
+			httpmw.ExtractWorkspaceAgentParam(dbFail),
+		)
+		rtr.Get("/", func(rw http.ResponseWriter, r *http.Request) {
+			_ = httpmw.WorkspaceAgentParam(r)
+			rw.WriteHeader(http.StatusOK)
+		})
+
+		r, _ := setupAuthentication(db)
+
+		rw := httptest.NewRecorder()
+		rtr.ServeHTTP(rw, r)
+
+		res := rw.Result()
+		defer res.Body.Close()
+		require.Equal(t, http.StatusNotFound, res.StatusCode)
+	})
+
 	t.Run("WorkspaceAgent", func(t *testing.T) {
 		t.Parallel()
-		db := dbfake.New()
+		db := dbmem.New()
 		rtr := chi.NewRouter()
 		rtr.Use(
 			httpmw.ExtractAPIKeyMW(httpmw.ExtractAPIKeyConfig{

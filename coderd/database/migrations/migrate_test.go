@@ -1,5 +1,3 @@
-//go:build linux
-
 package migrations_test
 
 import (
@@ -8,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 
@@ -19,22 +18,22 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
-	"golang.org/x/exp/slices"
+	"golang.org/x/sync/errgroup"
 
-	"github.com/coder/coder/coderd/database/migrations"
-	"github.com/coder/coder/coderd/database/postgres"
-	"github.com/coder/coder/testutil"
+	"github.com/coder/coder/v2/coderd/database/dbtestutil"
+	"github.com/coder/coder/v2/coderd/database/migrations"
+	"github.com/coder/coder/v2/testutil"
 )
 
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	goleak.VerifyTestMain(m, testutil.GoleakOptions...)
 }
 
 func TestMigrate(t *testing.T) {
 	t.Parallel()
 
 	if testing.Short() {
-		t.Skip()
+		t.SkipNow()
 		return
 	}
 
@@ -45,6 +44,22 @@ func TestMigrate(t *testing.T) {
 
 		err := migrations.Up(db)
 		require.NoError(t, err)
+	})
+
+	t.Run("Parallel", func(t *testing.T) {
+		t.Parallel()
+
+		db := testSQLDB(t)
+		eg := errgroup.Group{}
+
+		eg.Go(func() error {
+			return migrations.Up(db)
+		})
+		eg.Go(func() error {
+			return migrations.Up(db)
+		})
+
+		require.NoError(t, eg.Wait())
 	})
 
 	t.Run("Twice", func(t *testing.T) {
@@ -78,13 +93,19 @@ func TestMigrate(t *testing.T) {
 func testSQLDB(t testing.TB) *sql.DB {
 	t.Helper()
 
-	connection, closeFn, err := postgres.Open()
+	connection, err := dbtestutil.Open(t)
 	require.NoError(t, err)
-	t.Cleanup(closeFn)
 
 	db, err := sql.Open("postgres", connection)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
+
+	// dbtestutil.Open automatically runs migrations, but we want to actually test
+	// migration behavior in this package.
+	_, err = db.Exec(`DROP SCHEMA public CASCADE`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE SCHEMA public`)
+	require.NoError(t, err)
 
 	return db
 }
@@ -178,7 +199,7 @@ func (s *tableStats) Add(table string, n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.s[table] = s.s[table] + n
+	s.s[table] += n
 }
 
 func (s *tableStats) Empty() []string {
@@ -198,7 +219,7 @@ func TestMigrateUpWithFixtures(t *testing.T) {
 	t.Parallel()
 
 	if testing.Short() {
-		t.Skip()
+		t.SkipNow()
 		return
 	}
 
@@ -235,13 +256,16 @@ func TestMigrateUpWithFixtures(t *testing.T) {
 	// but we should eventually add fixtures for them.
 	ignoredTablesForStats := []string{
 		"audit_logs",
-		"git_auth_links",
+		"external_auth_links",
 		"group_members",
 		"licenses",
 		"replicas",
 		"template_version_parameters",
 		"workspace_build_parameters",
 		"template_version_variables",
+		"dbcrypt_keys", // having zero rows is a valid state for this table
+		"template_version_workspace_tags",
+		"notification_report_generator_logs",
 	}
 	s := &tableStats{s: make(map[string]int)}
 
@@ -257,9 +281,9 @@ func TestMigrateUpWithFixtures(t *testing.T) {
 			}
 		}
 		if len(emptyTables) > 0 {
-			t.Logf("The following tables have zero rows, consider adding fixtures for them or create a full database dump:")
+			t.Log("The following tables have zero rows, consider adding fixtures for them or create a full database dump:")
 			t.Errorf("tables have zero rows: %v", emptyTables)
-			t.Logf("See https://github.com/coder/coder/blob/main/docs/CONTRIBUTING.md#database-fixtures-for-testing-migrations for more information")
+			t.Log("See https://github.com/coder/coder/blob/main/docs/CONTRIBUTING.md#database-fixtures-for-testing-migrations for more information")
 		}
 	})
 
@@ -271,7 +295,9 @@ func TestMigrateUpWithFixtures(t *testing.T) {
 
 			db := testSQLDB(t)
 
-			ctx := testutil.Context(t, testutil.WaitLong)
+			// This test occasionally timed out in CI, which is understandable
+			// considering the amount of migrations and fixtures we have.
+			ctx := testutil.Context(t, testutil.WaitSuperLong)
 
 			// Prepare database for stepping up.
 			err := migrations.Down(db)

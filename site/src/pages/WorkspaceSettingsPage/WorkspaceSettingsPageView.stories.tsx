@@ -1,25 +1,25 @@
-import { ComponentMeta, Story } from "@storybook/react"
-import { MockWorkspace } from "testHelpers/entities"
-import {
-  WorkspaceSettingsPageView,
-  WorkspaceSettingsPageViewProps,
-} from "./WorkspaceSettingsPageView"
-import { action } from "@storybook/addon-actions"
+import { action } from "@storybook/addon-actions";
+import type { Meta, StoryObj } from "@storybook/react";
+import { MockWorkspace } from "testHelpers/entities";
+import { WorkspaceSettingsPageView } from "./WorkspaceSettingsPageView";
 
-export default {
-  title: "pages/WorkspaceSettingsPageView",
-  component: WorkspaceSettingsPageView,
-  args: {
-    error: undefined,
-    isSubmitting: false,
-    workspace: MockWorkspace,
-    onCancel: action("cancel"),
-  },
-} as ComponentMeta<typeof WorkspaceSettingsPageView>
+const meta: Meta<typeof WorkspaceSettingsPageView> = {
+	title: "pages/WorkspaceSettingsPage/WorkspaceSettingsPageView",
+	component: WorkspaceSettingsPageView,
+	args: {
+		error: undefined,
+		workspace: MockWorkspace,
+		onCancel: action("onCancel"),
+	},
+};
 
-const Template: Story<WorkspaceSettingsPageViewProps> = (args) => (
-  <WorkspaceSettingsPageView {...args} />
-)
+export default meta;
+type Story = StoryObj<typeof WorkspaceSettingsPageView>;
 
-export const Example = Template.bind({})
-Example.args = {}
+export const Example: Story = {};
+
+export const RenamesDisabled: Story = {
+	args: {
+		workspace: { ...MockWorkspace, allow_renames: false },
+	},
+};

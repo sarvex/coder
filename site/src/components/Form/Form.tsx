@@ -1,203 +1,198 @@
-import { makeStyles } from "@mui/styles"
+import { type Interpolation, type Theme, useTheme } from "@emotion/react";
+import { AlphaBadge, DeprecatedBadge } from "components/Badges/Badges";
+import { Stack } from "components/Stack/Stack";
 import {
-  FormFooterProps as BaseFormFooterProps,
-  FormFooter as BaseFormFooter,
-} from "components/FormFooter/FormFooter"
-import { Stack } from "components/Stack/Stack"
-import {
-  createContext,
-  FC,
-  HTMLProps,
-  PropsWithChildren,
-  useContext,
-} from "react"
-import { combineClasses } from "utils/combineClasses"
+	type ComponentProps,
+	type FC,
+	type HTMLProps,
+	type ReactNode,
+	createContext,
+	forwardRef,
+	useContext,
+} from "react";
+import { cn } from "utils/cn";
 
-type FormContextValue = { direction?: "horizontal" | "vertical" }
+type FormContextValue = { direction?: "horizontal" | "vertical" };
 
 const FormContext = createContext<FormContextValue>({
-  direction: "horizontal",
-})
+	direction: "horizontal",
+});
 
 type FormProps = HTMLProps<HTMLFormElement> & {
-  direction?: FormContextValue["direction"]
-}
+	direction?: FormContextValue["direction"];
+};
 
-export const Form: FC<FormProps> = ({ direction, className, ...formProps }) => {
-  const styles = useStyles({ direction })
+export const Form: FC<FormProps> = ({ direction, ...formProps }) => {
+	const theme = useTheme();
 
-  return (
-    <FormContext.Provider value={{ direction }}>
-      <form
-        {...formProps}
-        className={combineClasses([styles.form, className])}
-      />
-    </FormContext.Provider>
-  )
-}
+	return (
+		<FormContext.Provider value={{ direction }}>
+			<form
+				{...formProps}
+				css={{
+					display: "flex",
+					flexDirection: "column",
+					gap: direction === "horizontal" ? 80 : 40,
+
+					[theme.breakpoints.down("md")]: {
+						gap: 64,
+					},
+				}}
+			/>
+		</FormContext.Provider>
+	);
+};
 
 export const HorizontalForm: FC<HTMLProps<HTMLFormElement>> = ({
-  children,
-  ...formProps
+	children,
+	...formProps
 }) => {
-  return (
-    <Form direction="horizontal" {...formProps}>
-      {children}
-    </Form>
-  )
-}
+	return (
+		<Form direction="horizontal" {...formProps}>
+			{children}
+		</Form>
+	);
+};
 
 export const VerticalForm: FC<HTMLProps<HTMLFormElement>> = ({
-  children,
-  ...formProps
+	children,
+	...formProps
 }) => {
-  return (
-    <Form direction="vertical" {...formProps}>
-      {children}
-    </Form>
-  )
+	return (
+		<Form direction="vertical" {...formProps}>
+			{children}
+		</Form>
+	);
+};
+
+interface FormSectionProps {
+	children?: ReactNode;
+	title: ReactNode;
+	description: ReactNode;
+	classes?: {
+		root?: string;
+		sectionInfo?: string;
+		infoTitle?: string;
+	};
+	alpha?: boolean;
+	deprecated?: boolean;
 }
 
-export const FormSection: FC<
-  PropsWithChildren & {
-    title: string | JSX.Element
-    description: string | JSX.Element
-    classes?: {
-      root?: string
-      sectionInfo?: string
-      infoTitle?: string
-    }
-  }
-> = ({ children, title, description, classes = {} }) => {
-  const formContext = useContext(FormContext)
-  const styles = useStyles(formContext)
+export const FormSection = forwardRef<HTMLDivElement, FormSectionProps>(
+	(
+		{
+			children,
+			title,
+			description,
+			classes = {},
+			alpha = false,
+			deprecated = false,
+		},
+		ref,
+	) => {
+		const { direction } = useContext(FormContext);
 
-  return (
-    <div className={combineClasses([styles.formSection, classes.root])}>
-      <div
-        className={combineClasses([
-          classes.sectionInfo,
-          styles.formSectionInfo,
-        ])}
-      >
-        <h2
-          className={combineClasses([
-            styles.formSectionInfoTitle,
-            classes.infoTitle,
-          ])}
-        >
-          {title}
-        </h2>
-        <div className={styles.formSectionInfoDescription}>{description}</div>
-      </div>
+		return (
+			<section
+				ref={ref}
+				css={[
+					styles.formSection,
+					direction === "horizontal" && styles.formSectionHorizontal,
+				]}
+				className={classes.root}
+			>
+				<div
+					css={[
+						styles.formSectionInfo,
+						direction === "horizontal" && styles.formSectionInfoHorizontal,
+					]}
+					className={classes.sectionInfo}
+				>
+					<h2 css={styles.formSectionInfoTitle} className={classes.infoTitle}>
+						{title}
+						{alpha && <AlphaBadge />}
+						{deprecated && <DeprecatedBadge />}
+					</h2>
+					<div css={styles.formSectionInfoDescription}>{description}</div>
+				</div>
 
-      {children}
-    </div>
-  )
-}
+				{children}
+			</section>
+		);
+	},
+);
 
-export const FormFields: FC<PropsWithChildren> = ({ children }) => {
-  const styles = useStyles()
-  return (
-    <Stack
-      direction="column"
-      spacing={2.5}
-      className={styles.formSectionFields}
-    >
-      {children}
-    </Stack>
-  )
-}
+export const FormFields: FC<ComponentProps<typeof Stack>> = (props) => {
+	return (
+		<Stack
+			direction="column"
+			spacing={3}
+			{...props}
+			css={styles.formSectionFields}
+		/>
+	);
+};
 
-export const FormFooter: FC<BaseFormFooterProps> = (props) => {
-  const formFooterStyles = useFormFooterStyles()
-  return (
-    <BaseFormFooter
-      {...props}
-      styles={{ ...formFooterStyles, ...props.styles }}
-    />
-  )
-}
+const styles = {
+	formSection: (theme) => ({
+		display: "flex",
+		alignItems: "flex-start",
+		flexDirection: "column",
+		gap: 24,
 
-const useStyles = makeStyles((theme) => ({
-  form: {
-    display: "flex",
-    flexDirection: "column",
-    gap: ({ direction }: FormContextValue = {}) =>
-      direction === "horizontal" ? theme.spacing(10) : theme.spacing(5),
+		[theme.breakpoints.down("lg")]: {
+			flexDirection: "column",
+			gap: 16,
+		},
+	}),
+	formSectionHorizontal: {
+		flexDirection: "row",
+		gap: 120,
+	},
+	formSectionInfo: (theme) => ({
+		width: "100%",
+		flexShrink: 0,
+		top: 24,
 
-    [theme.breakpoints.down("md")]: {
-      gap: theme.spacing(8),
-    },
-  },
+		[theme.breakpoints.down("md")]: {
+			width: "100%",
+			position: "initial" as const,
+		},
+	}),
+	formSectionInfoHorizontal: {
+		maxWidth: 312,
+		position: "sticky",
+	},
+	formSectionInfoTitle: (theme) => ({
+		fontSize: 20,
+		color: theme.palette.text.primary,
+		fontWeight: 500,
+		margin: 0,
+		marginBottom: 8,
+		display: "flex",
+		flexDirection: "row",
+		alignItems: "center",
+		gap: 12,
+	}),
 
-  formSection: {
-    display: "flex",
-    alignItems: "flex-start",
-    gap: ({ direction }: FormContextValue = {}) =>
-      direction === "horizontal" ? theme.spacing(15) : theme.spacing(3),
-    flexDirection: ({ direction }: FormContextValue = {}) =>
-      direction === "horizontal" ? "row" : "column",
+	formSectionInfoDescription: (theme) => ({
+		fontSize: 14,
+		color: theme.palette.text.secondary,
+		lineHeight: "160%",
+		margin: 0,
+	}),
 
-    [theme.breakpoints.down("md")]: {
-      flexDirection: "column",
-      gap: theme.spacing(2),
-    },
-  },
+	formSectionFields: {
+		width: "100%",
+	},
+} satisfies Record<string, Interpolation<Theme>>;
 
-  formSectionInfo: {
-    width: "100%",
-    maxWidth: ({ direction }: FormContextValue = {}) =>
-      direction === "horizontal" ? 312 : undefined,
-    flexShrink: 0,
-    position: ({ direction }: FormContextValue = {}) =>
-      direction === "horizontal" ? "sticky" : undefined,
-    top: theme.spacing(3),
-
-    [theme.breakpoints.down("md")]: {
-      width: "100%",
-      position: "initial",
-    },
-  },
-
-  formSectionInfoTitle: {
-    fontSize: 20,
-    color: theme.palette.text.primary,
-    fontWeight: 400,
-    margin: 0,
-    marginBottom: theme.spacing(1),
-  },
-
-  formSectionInfoDescription: {
-    fontSize: 14,
-    color: theme.palette.text.secondary,
-    lineHeight: "160%",
-    margin: 0,
-  },
-
-  formSectionFields: {
-    width: "100%",
-  },
-}))
-
-const useFormFooterStyles = makeStyles((theme) => ({
-  button: {
-    minWidth: theme.spacing(23),
-
-    [theme.breakpoints.down("md")]: {
-      width: "100%",
-    },
-  },
-  footer: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "flex-start",
-    flexDirection: "row-reverse",
-    gap: theme.spacing(2),
-
-    [theme.breakpoints.down("md")]: {
-      flexDirection: "column",
-      gap: theme.spacing(1),
-    },
-  },
-}))
+export const FormFooter: FC<HTMLProps<HTMLDivElement>> = ({
+	className,
+	...props
+}) => (
+	<footer
+		className={cn("flex items-center justify-end space-x-2 mt-2", className)}
+		{...props}
+	/>
+);

@@ -5,20 +5,22 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/cli/clibase"
-	"github.com/coder/coder/cli/cliui"
-	"github.com/coder/coder/codersdk"
+	"github.com/coder/pretty"
+	"github.com/coder/serpent"
+
+	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/coder/v2/codersdk"
 )
 
-func (r *RootCmd) publickey() *clibase.Cmd {
+func (r *RootCmd) publickey() *serpent.Command {
 	var reset bool
 	client := new(codersdk.Client)
-	cmd := &clibase.Cmd{
+	cmd := &serpent.Command{
 		Use:        "publickey",
 		Aliases:    []string{"pubkey"},
 		Short:      "Output your Coder public key used for Git operations",
 		Middleware: r.InitClient(client),
-		Handler: func(inv *clibase.Invocation) error {
+		Handler: func(inv *serpent.Invocation) error {
 			if reset {
 				// Confirm prompt if using --reset. We don't want to accidentally
 				// reset our public key.
@@ -43,24 +45,24 @@ func (r *RootCmd) publickey() *clibase.Cmd {
 				return xerrors.Errorf("create codersdk client: %w", err)
 			}
 
-			cliui.Infof(inv.Stdout,
-				"This is your public key for using "+cliui.Styles.Field.Render("git")+" in "+
-					"Coder. All clones with SSH will be authenticated automatically 🪄.\n\n",
+			cliui.Info(inv.Stdout,
+				"This is your public key for using "+pretty.Sprint(cliui.DefaultStyles.Field, "git")+" in "+
+					"Coder. All clones with SSH will be authenticated automatically 🪄.",
 			)
-			cliui.Infof(inv.Stdout, cliui.Styles.Code.Render(strings.TrimSpace(key.PublicKey))+"\n\n")
-			cliui.Infof(inv.Stdout, "Add to GitHub and GitLab:"+"\n")
-			cliui.Infof(inv.Stdout, cliui.Styles.Prompt.String()+"https://github.com/settings/ssh/new"+"\n")
-			cliui.Infof(inv.Stdout, cliui.Styles.Prompt.String()+"https://gitlab.com/-/profile/keys"+"\n")
+			cliui.Info(inv.Stdout, pretty.Sprint(cliui.DefaultStyles.Code, strings.TrimSpace(key.PublicKey))+"\n")
+			cliui.Info(inv.Stdout, "Add to GitHub and GitLab:")
+			cliui.Info(inv.Stdout, "> https://github.com/settings/ssh/new")
+			cliui.Info(inv.Stdout, "> https://gitlab.com/-/profile/keys")
 
 			return nil
 		},
 	}
 
-	cmd.Options = clibase.OptionSet{
+	cmd.Options = serpent.OptionSet{
 		{
 			Flag:        "reset",
 			Description: "Regenerate your public key. This will require updating the key on any services it's registered with.",
-			Value:       clibase.BoolOf(&reset),
+			Value:       serpent.BoolOf(&reset),
 		},
 		cliui.SkipPromptOption(),
 	}

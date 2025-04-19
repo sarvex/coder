@@ -6,13 +6,16 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/coder/cli/clitest"
-	"github.com/coder/coder/cli/cliui"
-	"github.com/coder/coder/coderd/coderdtest"
-	"github.com/coder/coder/codersdk"
-	"github.com/coder/coder/enterprise/coderd/coderdenttest"
-	"github.com/coder/coder/enterprise/coderd/license"
-	"github.com/coder/coder/pty/ptytest"
+	"github.com/coder/pretty"
+
+	"github.com/coder/coder/v2/cli/clitest"
+	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/coder/v2/coderd/coderdtest"
+	"github.com/coder/coder/v2/coderd/rbac"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/enterprise/coderd/coderdenttest"
+	"github.com/coder/coder/v2/enterprise/coderd/license"
+	"github.com/coder/coder/v2/pty/ptytest"
 )
 
 func TestCreateGroup(t *testing.T) {
@@ -21,13 +24,12 @@ func TestCreateGroup(t *testing.T) {
 	t.Run("OK", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdenttest.New(t, nil)
-		coderdtest.CreateFirstUser(t, client)
-		_ = coderdenttest.AddLicense(t, client, coderdenttest.LicenseOptions{
+		client, admin := coderdenttest.New(t, &coderdenttest.Options{LicenseOptions: &coderdenttest.LicenseOptions{
 			Features: license.Features{
 				codersdk.FeatureTemplateRBAC: 1,
 			},
-		})
+		}})
+		anotherClient, _ := coderdtest.CreateAnotherUser(t, client, admin.OrganizationID, rbac.RoleUserAdmin())
 
 		var (
 			groupName = "test"
@@ -41,11 +43,11 @@ func TestCreateGroup(t *testing.T) {
 
 		pty := ptytest.New(t)
 		inv.Stdout = pty.Output()
-		clitest.SetupConfig(t, client, conf)
+		clitest.SetupConfig(t, anotherClient, conf)
 
 		err := inv.Run()
 		require.NoError(t, err)
 
-		pty.ExpectMatch(fmt.Sprintf("Successfully created group %s!", cliui.Styles.Keyword.Render(groupName)))
+		pty.ExpectMatch(fmt.Sprintf("Successfully created group %s!", pretty.Sprint(cliui.DefaultStyles.Keyword, groupName)))
 	})
 }
